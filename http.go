@@ -26,6 +26,10 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.health)
+	mux.HandleFunc("POST /v1/admin/enrollments", a.createEnrollment)
+	mux.HandleFunc("POST /v1/workers/connect", a.connectWorker)
+	mux.HandleFunc("GET /v1/workers/me", a.workerMe)
+	mux.HandleFunc("GET /v1/jobs/current", a.currentJob)
 	mux.HandleFunc("POST /v1/workers/heartbeat", a.workerHeartbeat)
 	mux.HandleFunc("POST /v1/jobs/claim", a.claim)
 	mux.HandleFunc("POST /v1/jobs/{id}/heartbeat", a.jobHeartbeat)
@@ -52,7 +56,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/events", a.command)
 	mux.HandleFunc("GET /releases/android-stable/{name}", a.release)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/v1/") && !strings.HasPrefix(r.URL.Path, "/v1/admin/") {
+		if strings.HasPrefix(r.URL.Path, "/v1/") && !strings.HasPrefix(r.URL.Path, "/v1/admin/") && !(r.Method == http.MethodPost && r.URL.Path == "/v1/workers/connect") {
 			token := bearer(r)
 			if token == "" {
 				fail(w, ErrUnauthorized)
@@ -167,11 +171,31 @@ func (a *API) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 func (a *API) workerHeartbeat(w http.ResponseWriter, r *http.Request) {
+	var raw json.RawMessage
 	var h WorkerHeartbeat
-	if !a.decode(w, r, &h) || !a.device(w, r, h.WorkerID) {
+	if !a.decode(w, r, &raw) {
 		return
 	}
-	if e := a.Store.Heartbeat(r.Context(), h); e != nil {
+	if json.Unmarshal(raw, &h) != nil {
+		fail(w, ErrInvalid)
+		return
+	}
+	if !a.device(w, r, h.WorkerID) {
+		return
+	}
+	profile, e := profileHeader(r, false)
+	if e != nil {
+		fail(w, e)
+		return
+	}
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &fields)
+	h.Capabilities, e = bodyCapabilities(profile, fields["capabilities"])
+	if e != nil {
+		fail(w, e)
+		return
+	}
+	if e := a.Store.HeartbeatWithProfile(r.Context(), h, profile); e != nil {
 		fail(w, e)
 		return
 	}
@@ -184,13 +208,23 @@ func (a *API) workerHeartbeat(w http.ResponseWriter, r *http.Request) {
 }
 func (a *API) claim(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		WorkerID     string   `json:"worker_id"`
-		Capabilities []string `json:"capabilities"`
+		WorkerID     string          `json:"worker_id"`
+		Capabilities json.RawMessage `json:"capabilities"`
 	}
 	if !a.decode(w, r, &req) || !a.device(w, r, req.WorkerID) {
 		return
 	}
-	job, e := a.Store.Claim(r.Context(), req.WorkerID, req.Capabilities)
+	profile, e := profileHeader(r, false)
+	if e != nil {
+		fail(w, e)
+		return
+	}
+	caps, e := bodyCapabilities(profile, req.Capabilities)
+	if e != nil {
+		fail(w, e)
+		return
+	}
+	job, e := a.Store.ClaimWithProfile(r.Context(), req.WorkerID, caps, profile)
 	if errors.Is(e, ErrNotFound) {
 		w.WriteHeader(204)
 		return

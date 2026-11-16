@@ -53,6 +53,18 @@ type artifactUpload struct {
 func (s *Store) upload(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, id string, identity AttemptIdentity, lock bool) (artifactUpload, error) {
+	u, e := s.artifactByID(ctx, q, id, lock)
+	if e != nil {
+		return u, e
+	}
+	if u.worker != identity.WorkerID || u.attempt != identity.AttemptID || u.fence != identity.FencingToken {
+		return u, ErrUnauthorized
+	}
+	return u, nil
+}
+func (s *Store) artifactByID(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, id string, lock bool) (artifactUpload, error) {
 	var u artifactUpload
 	sql := `SELECT id::text,job_id::text,attempt_id::text,worker_id,fencing_token,artifact_key,artifact_name,media_type,status,byte_offset,coalesce(blob_sha256,''),receipt,chunks_cleaned FROM ` + s.table("artifact_uploads") + ` WHERE id=$1`
 	if lock {
@@ -64,9 +76,6 @@ func (s *Store) upload(ctx context.Context, q interface {
 	}
 	if e != nil {
 		return u, e
-	}
-	if u.worker != identity.WorkerID || u.attempt != identity.AttemptID || u.fence != identity.FencingToken {
-		return u, ErrUnauthorized
 	}
 	if u.name == "" {
 		u.name = u.key
@@ -121,27 +130,58 @@ func (s *Store) CreateArtifact(ctx context.Context, job string, c CreateArtifact
 			return out, false, ErrConflict
 		}
 	}
-	out, e = s.ArtifactStatus(ctx, id, c.AttemptIdentity)
+	out, e = s.artifactWriteStatus(ctx, id, c.AttemptIdentity)
 	return out, created, e
 }
 func (s *Store) ArtifactStatus(ctx context.Context, id string, identity AttemptIdentity) (ArtifactStatus, error) {
-	out := ArtifactStatus{UploadID: id}
+	if !identity.valid() {
+		return ArtifactStatus{}, ErrInvalid
+	}
+	tx, e := s.Pool.Begin(ctx)
+	if e != nil {
+		return ArtifactStatus{}, e
+	}
+	defer tx.Rollback(ctx)
+	u, e := s.artifactByID(ctx, tx, id, false)
+	if e != nil {
+		return ArtifactStatus{}, e
+	}
+	if e = s.currentAttempt(ctx, tx, u.job, identity); e != nil {
+		return ArtifactStatus{}, e
+	}
+	out, e := s.artifactStatusSnapshot(ctx, tx, u, identity.AttemptID)
+	if e != nil {
+		return out, e
+	}
+	if e = s.currentAttempt(ctx, tx, u.job, identity); e != nil {
+		return ArtifactStatus{}, e
+	}
+	return out, tx.Commit(ctx)
+}
+func (s *Store) artifactWriteStatus(ctx context.Context, id string, identity AttemptIdentity) (ArtifactStatus, error) {
 	u, e := s.upload(ctx, s.Pool, id, identity, false)
 	if e != nil {
-		return out, e
+		return ArtifactStatus{}, e
 	}
+	return s.artifactStatusSnapshot(ctx, s.Pool, u, u.attempt)
+}
+func (s *Store) artifactStatusSnapshot(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, u artifactUpload, attempt string) (ArtifactStatus, error) {
+	id := u.id
+	out := ArtifactStatus{UploadID: id}
 	out.Status = u.status
 	out.Offset = u.offset
-	e = s.Pool.QueryRow(ctx, `SELECT a.lease_until,j.cancel_requested FROM `+s.table("attempts")+` a JOIN `+s.table("jobs")+` j ON j.id=a.job_id WHERE a.id=$1`, u.attempt).Scan(&out.LeaseUntil, &out.CancelRequested)
+	e := q.QueryRow(ctx, `SELECT a.lease_until,j.cancel_requested FROM `+s.table("attempts")+` a JOIN `+s.table("jobs")+` j ON j.id=a.job_id WHERE a.id=$1`, attempt).Scan(&out.LeaseUntil, &out.CancelRequested)
 	if e != nil {
 		return out, e
 	}
-	e = s.Pool.QueryRow(ctx, `SELECT count(*) FROM `+s.table("artifact_chunks")+` WHERE upload_id=$1`, id).Scan(&out.SegmentsCount)
+	e = q.QueryRow(ctx, `SELECT count(*) FROM `+s.table("artifact_chunks")+` WHERE upload_id=$1`, id).Scan(&out.SegmentsCount)
 	if e != nil {
 		return out, e
 	}
 	last := ArtifactChunk{UploadID: id}
-	e = s.Pool.QueryRow(ctx, `SELECT byte_offset,length,sha256 FROM `+s.table("artifact_chunks")+` WHERE upload_id=$1 ORDER BY byte_offset DESC LIMIT 1`, id).Scan(&last.Offset, &last.Length, &last.SHA256)
+	e = q.QueryRow(ctx, `SELECT byte_offset,length,sha256 FROM `+s.table("artifact_chunks")+` WHERE upload_id=$1 ORDER BY byte_offset DESC LIMIT 1`, id).Scan(&last.Offset, &last.Length, &last.SHA256)
 	if e == nil {
 		last.NextOffset = last.Offset + last.Length
 		out.LastSegment = &last
@@ -249,5 +289,5 @@ func (s *Store) AbortArtifact(ctx context.Context, id string, identity AttemptId
 	if e != nil {
 		return ArtifactStatus{}, e
 	}
-	return s.ArtifactStatus(ctx, id, identity)
+	return s.artifactWriteStatus(ctx, id, identity)
 }

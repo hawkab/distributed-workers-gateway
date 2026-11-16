@@ -93,13 +93,14 @@ type WorkerHeartbeat struct {
 	ActiveJobID  string   `json:"active_job_id,omitempty"`
 }
 type EnqueueJob struct {
-	IdempotencyKey       string          `json:"idempotency_key,omitempty"`
-	Operation            string          `json:"operation"`
-	Input                json.RawMessage `json:"input"`
-	Network              json.RawMessage `json:"network,omitempty"`
-	Script               string          `json:"script,omitempty"`
-	RequiredCapabilities []string        `json:"required_capabilities,omitempty"`
-	Priority             int             `json:"priority,omitempty"`
+	IdempotencyKey       string                `json:"idempotency_key,omitempty"`
+	Operation            string                `json:"operation"`
+	Input                json.RawMessage       `json:"input"`
+	Network              json.RawMessage       `json:"network,omitempty"`
+	Script               string                `json:"script,omitempty"`
+	RequiredCapabilities []string              `json:"required_capabilities,omitempty"`
+	Priority             int                   `json:"priority,omitempty"`
+	ResourceRequirements *ResourceRequirements `json:"resource_requirements,omitempty"`
 }
 
 func (j EnqueueJob) normalized() (EnqueueJob, error) {
@@ -114,6 +115,14 @@ func (j EnqueueJob) normalized() (EnqueueJob, error) {
 		return j, ErrInvalid
 	}
 	var e error
+	if j.ResourceRequirements != nil {
+		if e = j.ResourceRequirements.validate(); e != nil {
+			return j, e
+		}
+		if *j.ResourceRequirements == (ResourceRequirements{}) {
+			j.ResourceRequirements = nil
+		}
+	}
 	j.Input, e = canonical(j.Input)
 	if e != nil {
 		return j, e
@@ -143,14 +152,15 @@ func (j EnqueueJob) normalized() (EnqueueJob, error) {
 }
 
 type ClaimedJob struct {
-	ID           string          `json:"id"`
-	Operation    string          `json:"operation"`
-	Input        json.RawMessage `json:"input"`
-	Network      json.RawMessage `json:"network,omitempty"`
-	Script       string          `json:"script,omitempty"`
-	AttemptID    string          `json:"attempt_id"`
-	FencingToken int64           `json:"fencing_token"`
-	LeaseUntil   time.Time       `json:"lease_until"`
+	ID                   string          `json:"id"`
+	Operation            string          `json:"operation"`
+	Input                json.RawMessage `json:"input"`
+	Network              json.RawMessage `json:"network,omitempty"`
+	Script               string          `json:"script,omitempty"`
+	AttemptID            string          `json:"attempt_id"`
+	FencingToken         int64           `json:"fencing_token"`
+	LeaseUntil           time.Time       `json:"lease_until"`
+	ResourceRequirements json.RawMessage `json:"resource_requirements,omitempty"`
 }
 type JobHeartbeat struct {
 	WorkerID     string          `json:"worker_id"`

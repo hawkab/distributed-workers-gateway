@@ -38,6 +38,34 @@ No job execution is tied to the lifetime of an HTTP request. Device requests
 use a 16 MiB JSON control budget. Binary chunk routes stream directly to private
 storage with a fixed copy buffer and no aggregate artifact-size deadline or cap.
 
+## Worker identity and resource admission
+
+An administrator creates an enrollment credential with
+`POST /v1/admin/enrollments {}`. Its hash is stored without a worker identity
+until the device calls `POST /v1/workers/connect {}`. Connect requires that
+credential and `X-Worker-Profile`: unpadded base64url of the protocol's schema 1
+JSON profile. The server atomically assigns a UUID. Retrying the same credential,
+including after losing the reply or restarting either side, returns the same ID;
+the bearer credential remains unchanged. Existing device tokens retain their
+legacy IDs. There is no anonymous registration or client-selected new ID.
+
+Profiles contain capability names and numeric CPU/RAM/disk/GPU availability only.
+Unknown values remain unknown; model names, hostnames and serials are rejected.
+`GET /v1/workers/me` exposes only the caller's stored profile and server observation
+time. `GET /v1/jobs/current` returns only its own live assignment, without extending
+the lease. Fleet/history views require the separate administrator credential.
+
+Heartbeat and claim accept an optional profile header for legacy compatibility.
+When present, its capabilities are authoritative; conflicting body capabilities
+return 400. New jobs can declare `resource_requirements` for available CPU cores,
+RAM, disk, GPU count, per-GPU compute units and allocatable GPU memory. Positive
+requirements need a fresh profile on that claim RPC; stored old availability is
+never reused. Ordinary jobs remain available to legacy clients. Eligibility is
+filtered in SQL before the queue limit/row locks, so unsuitable jobs do not hide
+a later compatible job. Dedicated GPUs are preferred over shared-memory devices;
+unified or unknown-sharing GPU memory also consumes the available host-RAM budget.
+GPU total memory alone does not prove an allocation budget.
+
 ## Streamed results and external effects
 
 Create `/v1/jobs/{job}/artifacts` with the attempt identity, stable `key`, optional
@@ -60,8 +88,11 @@ acknowledged segments. Stale attempt outputs remain candidates, and a current
 attempt may explicitly adopt a sealed earlier-attempt output of the same job.
 
 `GET /v1/admin/artifacts/{id}/content` requires the admin token. The worker content
-route requires device/attempt headers and permits the original creator or a
-current live attempt of the same job. Neither route exposes filesystem paths.
+route requires device/attempt headers and a current live attempt of the same job.
+Artifact/effect status and cached begin-response replay have the same restriction;
+the former creator loses read access after expiry, reassignment or completion.
+Late write receipts and candidate outputs are still retained. Neither route
+exposes filesystem paths.
 Keep PG metadata and artifact storage together when backing up or restoring.
 The filesystem must support atomic hard links and fsync; no expiration deletes
 candidate or canonical objects implicitly.
@@ -88,9 +119,11 @@ graceful shutdown drains active requests rather than imposing a fixed deadline.
 `fleetctl` reads `WORKER_API_URL` (default `http://127.0.0.1:18220`) and
 `WORKER_ADMIN_TOKEN` from its environment. Commands:
 
-- `fleetctl init-worker DEVICE-ID`: enrolls a device and prints its one-time token
-  response. Capture it only into private provisioning storage; never into logs.
-- `fleetctl enqueue job.json`: submits `{operation,input,script?,required_capabilities?,idempotency_key?}`.
+- `fleetctl init-worker`: creates a pending enrollment credential; the device
+  obtains its server ID through connect. Supplying `DEVICE-ID` preserves the
+  legacy administrator registration flow. Capture credentials only into private
+  provisioning storage, never logs.
+- `fleetctl enqueue job.json`: submits `{operation,input,script?,required_capabilities?,resource_requirements?,idempotency_key?}`.
 - `fleetctl status [JOB-ID]`, `workers`, `metrics`, `cancel JOB-ID`.
 
 `POST /v1/admin/workers/{id}/policy` or `PATCH /v1/admin/workers/{id}` accepts

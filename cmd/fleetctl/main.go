@@ -12,7 +12,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: fleetctl init-worker ID | enqueue JSON-FILE | status [JOB-ID] | workers | metrics | cancel JOB-ID")
+		fatal("usage: fleetctl init-worker [LEGACY-ID] | enqueue JSON-FILE | status [JOB-ID] | workers | metrics | cancel JOB-ID")
 	}
 	base := os.Getenv("WORKER_API_URL")
 	if base == "" {
@@ -26,11 +26,15 @@ func main() {
 	var body []byte
 	switch os.Args[1] {
 	case "init-worker":
-		if len(os.Args) != 3 {
-			fatal("worker ID required")
+		if len(os.Args) == 2 {
+			method, path = "POST", "/v1/admin/enrollments"
+			body = []byte(`{}`)
+		} else if len(os.Args) == 3 {
+			method, path = "POST", "/v1/admin/workers"
+			body, _ = json.Marshal(map[string]string{"worker_id": os.Args[2]})
+		} else {
+			fatal("init-worker accepts one optional legacy ID")
 		}
-		method, path = "POST", "/v1/admin/workers"
-		body, _ = json.Marshal(map[string]string{"worker_id": os.Args[2]})
 	case "enqueue":
 		if len(os.Args) != 3 {
 			fatal("JSON file required (or - for stdin)")

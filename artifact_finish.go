@@ -323,12 +323,17 @@ func (s *Store) validateArtifacts(ctx context.Context, tx pgx.Tx, job string, id
 	return nil
 }
 func (s *Store) OpenArtifact(ctx context.Context, id string) (*os.File, ArtifactRef, error) {
+	return s.openArtifact(ctx, s.Pool, id)
+}
+func (s *Store) openArtifact(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, id string) (*os.File, ArtifactRef, error) {
 	var ref ArtifactRef
 	ref.ArtifactID = id
 	if s.Artifacts == nil {
 		return nil, ref, ErrUnavailable
 	}
-	e := s.Pool.QueryRow(ctx, `SELECT coalesce(nullif(artifact_name,''),artifact_key),media_type,blob_sha256,byte_offset FROM `+s.table("artifact_uploads")+` WHERE id=$1 AND status='sealed'`, id).Scan(&ref.Name, &ref.MediaType, &ref.SHA256, &ref.Length)
+	e := q.QueryRow(ctx, `SELECT coalesce(nullif(artifact_name,''),artifact_key),media_type,blob_sha256,byte_offset FROM `+s.table("artifact_uploads")+` WHERE id=$1 AND status='sealed'`, id).Scan(&ref.Name, &ref.MediaType, &ref.SHA256, &ref.Length)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return nil, ref, ErrNotFound
 	}
@@ -343,35 +348,55 @@ func (s *Store) OpenWorkerArtifact(ctx context.Context, id string, i AttemptIden
 	if !i.valid() {
 		return nil, ref, ErrInvalid
 	}
-	var job, owner, attempt string
-	var fence int64
-	e := s.Pool.QueryRow(ctx, `SELECT job_id::text,worker_id,attempt_id::text,fencing_token FROM `+s.table("artifact_uploads")+` WHERE id=$1 AND status='sealed'`, id).Scan(&job, &owner, &attempt, &fence)
+	var job string
+	e := s.Pool.QueryRow(ctx, `SELECT job_id::text FROM `+s.table("artifact_uploads")+` WHERE id=$1 AND status='sealed'`, id).Scan(&job)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return nil, ref, ErrNotFound
 	}
 	if e != nil {
 		return nil, ref, e
 	}
-	if i.WorkerID == owner && i.AttemptID == attempt && i.FencingToken == fence {
-		return s.OpenArtifact(ctx, id)
-	}
 	tx, e := s.Pool.Begin(ctx)
 	if e != nil {
 		return nil, ref, e
 	}
 	defer tx.Rollback(ctx)
-	live, e := s.attemptState(ctx, tx, job, i)
-	if errors.Is(e, ErrNotFound) {
-		return nil, ref, ErrUnauthorized
+	if e = s.currentAttempt(ctx, tx, job, i); e != nil {
+		return nil, ref, e
 	}
+	file, ref, e := s.openArtifact(ctx, tx, id)
 	if e != nil {
 		return nil, ref, e
 	}
-	if !live {
-		return nil, ref, ErrLeaseLost
-	}
-	if e = tx.Commit(ctx); e != nil {
+	if e = s.currentAttempt(ctx, tx, job, i); e != nil {
+		file.Close()
 		return nil, ref, e
 	}
-	return s.OpenArtifact(ctx, id)
+	if e = tx.Commit(ctx); e != nil {
+		file.Close()
+		return nil, ref, e
+	}
+	return file, ref, nil
+}
+
+func (s *Store) currentAttempt(ctx context.Context, tx pgx.Tx, job string, i AttemptIdentity) error {
+	live, e := s.attemptState(ctx, tx, job, i)
+	if errors.Is(e, ErrNotFound) {
+		return ErrUnauthorized
+	}
+	if e != nil {
+		return e
+	}
+	if !live {
+		return ErrLeaseLost
+	}
+	var enabled bool
+	e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM `+s.table("workers")+` WHERE id=$1 AND enabled)`, i.WorkerID).Scan(&enabled)
+	if e != nil {
+		return e
+	}
+	if !enabled {
+		return ErrUnauthorized
+	}
+	return nil
 }

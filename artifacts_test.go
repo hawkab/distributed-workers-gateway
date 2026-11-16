@@ -120,16 +120,19 @@ func TestArtifactLargeStreamBoundedMemoryDedupAndSingleChunkHardlink(t *testing.
 	if _, e = os.Stat(s.Artifacts.chunkPath(a.UploadID, 0, chunk.SHA256)); !errors.Is(e, os.ErrNotExist) {
 		t.Fatal("duplicate chunk retained", e)
 	}
+	status, e := s.ArtifactStatus(ctx, a.UploadID, i)
+	must(t, e)
+	if status.Status != "sealed" || status.Offset != size || status.SegmentsCount != 1 || status.LastSegment == nil {
+		t.Fatal(status)
+	}
 	expire(t, s, j.AttemptID)
 	again, e := s.FinishArtifact(ctx, a.UploadID, FinishArtifact{AttemptIdentity: i, Length: size})
 	must(t, e)
 	if !reflect.DeepEqual(ref, again) {
 		t.Fatal("receipt changed after lease expiry")
 	}
-	status, e := s.ArtifactStatus(ctx, a.UploadID, i)
-	must(t, e)
-	if status.Status != "sealed" || status.Offset != size || status.SegmentsCount != 1 || status.LastSegment == nil {
-		t.Fatal(status)
+	if _, e = s.ArtifactStatus(ctx, a.UploadID, i); !errors.Is(e, ErrLeaseLost) {
+		t.Fatal("expired creator retained status read", e)
 	}
 }
 func TestArtifactAbortStreamNoPartialAndCommittedOffsetReconciles(t *testing.T) {

@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS %[8]s(
 	if e != nil {
 		return e
 	}
+	if e = s.initProfiles(ctx); e != nil {
+		return e
+	}
 	return s.initArtifacts(ctx)
 }
 func (s *Store) WorkerByToken(ctx context.Context, token string) (string, error) {
@@ -111,7 +114,18 @@ func (s *Store) RegisterWorker(ctx context.Context, id, token string) error {
 	return e
 }
 func (s *Store) Heartbeat(ctx context.Context, h WorkerHeartbeat) error {
-	tag, e := s.Pool.Exec(ctx, `UPDATE `+s.table("workers")+` SET capabilities=$2,abis=$3,version_code=$4,version_name=$5,state=$6,active_job_id=$7,last_seen_at=clock_timestamp() WHERE id=$1 AND enabled`, h.WorkerID, sortedUnique(h.Capabilities), sortedUnique(h.ABIs), h.VersionCode, h.VersionName, h.State, h.ActiveJobID)
+	return s.HeartbeatWithProfile(ctx, h, nil)
+}
+func (s *Store) HeartbeatWithProfile(ctx context.Context, h WorkerHeartbeat, profile *WorkerProfile) error {
+	if profile != nil {
+		var e error
+		profile, e = profile.normalized()
+		if e != nil {
+			return e
+		}
+		h.Capabilities = profile.Capabilities
+	}
+	tag, e := s.Pool.Exec(ctx, `UPDATE `+s.table("workers")+` SET capabilities=$2,abis=$3,version_code=$4,version_name=$5,state=$6,active_job_id=$7,last_seen_at=clock_timestamp(),profile=CASE WHEN $8::jsonb IS NULL THEN profile ELSE $8::jsonb END,profile_observed_at=CASE WHEN $8::jsonb IS NULL THEN profile_observed_at ELSE clock_timestamp() END WHERE id=$1 AND enabled`, h.WorkerID, sortedUnique(h.Capabilities), sortedUnique(h.ABIs), h.VersionCode, h.VersionName, h.State, h.ActiveJobID, profileBytes(profile))
 	if e == nil && tag.RowsAffected() == 0 {
 		return ErrUnauthorized
 	}
@@ -157,7 +171,11 @@ func (s *Store) enqueue(ctx context.Context, tx pgx.Tx, j EnqueueJob) (string, e
 	if len(network) == 0 {
 		network = json.RawMessage(`{}`)
 	}
-	e := tx.QueryRow(ctx, `INSERT INTO `+s.table("jobs")+`(id,operation,input,script,required_capabilities,priority,idempotency_key,request_hash,network) VALUES($1,$2,$3,$4,$5,$6,nullif($7,''),$8,$9) ON CONFLICT(idempotency_key) DO NOTHING RETURNING id::text`, id, j.Operation, []byte(j.Input), j.Script, j.RequiredCapabilities, j.Priority, j.IdempotencyKey, hash, []byte(network)).Scan(&saved)
+	resources, _ := json.Marshal(j.ResourceRequirements)
+	if j.ResourceRequirements == nil {
+		resources = []byte(`{}`)
+	}
+	e := tx.QueryRow(ctx, `INSERT INTO `+s.table("jobs")+`(id,operation,input,script,required_capabilities,priority,idempotency_key,request_hash,network,resource_requirements) VALUES($1,$2,$3,$4,$5,$6,nullif($7,''),$8,$9,$10) ON CONFLICT(idempotency_key) DO NOTHING RETURNING id::text`, id, j.Operation, []byte(j.Input), j.Script, j.RequiredCapabilities, j.Priority, j.IdempotencyKey, hash, []byte(network), resources).Scan(&saved)
 	if errors.Is(e, pgx.ErrNoRows) {
 		var old []byte
 		e = tx.QueryRow(ctx, `SELECT id::text,request_hash FROM `+s.table("jobs")+` WHERE idempotency_key=$1`, j.IdempotencyKey).Scan(&saved, &old)

@@ -8,6 +8,17 @@ import (
 )
 
 func (s *Store) Claim(ctx context.Context, worker string, capabilities []string) (*ClaimedJob, error) {
+	return s.ClaimWithProfile(ctx, worker, capabilities, nil)
+}
+func (s *Store) ClaimWithProfile(ctx context.Context, worker string, capabilities []string, profile *WorkerProfile) (*ClaimedJob, error) {
+	if profile != nil {
+		var e error
+		profile, e = profile.normalized()
+		if e != nil {
+			return nil, e
+		}
+		capabilities = profile.Capabilities
+	}
 	tx, e := s.Pool.Begin(ctx)
 	if e != nil {
 		return nil, e
@@ -16,12 +27,12 @@ func (s *Store) Claim(ctx context.Context, worker string, capabilities []string)
 	if e = s.lockWorker(ctx, tx, worker); e != nil {
 		return nil, e
 	}
-	_, e = tx.Exec(ctx, `UPDATE `+s.table("workers")+` SET capabilities=$2,last_seen_at=clock_timestamp() WHERE id=$1`, worker, sortedUnique(capabilities))
+	_, e = tx.Exec(ctx, `UPDATE `+s.table("workers")+` SET capabilities=$2,last_seen_at=clock_timestamp(),profile=CASE WHEN $3::jsonb IS NULL THEN profile ELSE $3::jsonb END,profile_observed_at=CASE WHEN $3::jsonb IS NULL THEN profile_observed_at ELSE clock_timestamp() END WHERE id=$1`, worker, sortedUnique(capabilities), profileBytes(profile))
 	if e != nil {
 		return nil, e
 	}
 	var j ClaimedJob
-	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,a.id::text,a.fencing_token,a.lease_until,j.network FROM `+s.table("jobs")+` j JOIN `+s.table("attempts")+` a ON a.id=j.active_attempt_id WHERE j.status='running' AND a.worker_id=$1 AND a.status='running' AND a.lease_until>clock_timestamp() ORDER BY a.started_at LIMIT 1`, worker).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.AttemptID, &j.FencingToken, &j.LeaseUntil, &j.Network)
+	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,a.id::text,a.fencing_token,a.lease_until,j.network,j.resource_requirements FROM `+s.table("jobs")+` j JOIN `+s.table("attempts")+` a ON a.id=j.active_attempt_id WHERE j.status='running' AND a.worker_id=$1 AND a.status='running' AND a.lease_until>clock_timestamp() ORDER BY a.started_at LIMIT 1`, worker).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.AttemptID, &j.FencingToken, &j.LeaseUntil, &j.Network, &j.ResourceRequirements)
 	if e == nil {
 		return &j, tx.Commit(ctx)
 	}
@@ -29,7 +40,7 @@ func (s *Store) Claim(ctx context.Context, worker string, capabilities []string)
 		return nil, e
 	}
 	var oldAttempt *string
-	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,j.fencing_token,j.active_attempt_id::text,j.network FROM `+s.table("jobs")+` j WHERE NOT j.cancel_requested AND j.not_before<=clock_timestamp() AND j.required_capabilities<@$1::text[] AND (j.status='queued' OR(j.status='running' AND EXISTS(SELECT 1 FROM `+s.table("attempts")+` a WHERE a.id=j.active_attempt_id AND a.lease_until<=clock_timestamp()))) ORDER BY j.priority DESC,j.created_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`, sortedUnique(capabilities)).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.FencingToken, &oldAttempt, &j.Network)
+	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,j.fencing_token,j.active_attempt_id::text,j.network,j.resource_requirements FROM `+s.table("jobs")+` j WHERE NOT j.cancel_requested AND j.not_before<=clock_timestamp() AND j.required_capabilities<@$1::text[] AND `+s.table("resources_match")+`($2::jsonb,j.resource_requirements) AND (j.status='queued' OR(j.status='running' AND EXISTS(SELECT 1 FROM `+s.table("attempts")+` a WHERE a.id=j.active_attempt_id AND a.lease_until<=clock_timestamp()))) ORDER BY j.priority DESC,j.created_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`, sortedUnique(capabilities), profileBytes(profile)).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.FencingToken, &oldAttempt, &j.Network, &j.ResourceRequirements)
 	if errors.Is(e, pgx.ErrNoRows) {
 		if e = tx.Commit(ctx); e != nil {
 			return nil, e
@@ -66,6 +77,14 @@ func (s *Store) Claim(ctx context.Context, worker string, capabilities []string)
 		return nil, e
 	}
 	return &j, tx.Commit(ctx)
+}
+func (s *Store) CurrentJob(ctx context.Context, worker string) (*ClaimedJob, error) {
+	var j ClaimedJob
+	e := s.Pool.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,a.id::text,a.fencing_token,a.lease_until,j.network,j.resource_requirements FROM `+s.table("jobs")+` j JOIN `+s.table("attempts")+` a ON a.id=j.active_attempt_id JOIN `+s.table("workers")+` w ON w.id=a.worker_id WHERE w.id=$1 AND w.enabled AND j.status='running' AND NOT j.cancel_requested AND a.status='running' AND a.lease_until>clock_timestamp() AND a.fencing_token=j.fencing_token ORDER BY a.started_at LIMIT 1`, worker).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.AttemptID, &j.FencingToken, &j.LeaseUntil, &j.Network, &j.ResourceRequirements)
+	if errors.Is(e, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return &j, e
 }
 func (s *Store) JobHeartbeat(ctx context.Context, job string, h JobHeartbeat) (LeaseReceipt, error) {
 	var out LeaseReceipt

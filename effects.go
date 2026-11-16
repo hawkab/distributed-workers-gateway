@@ -198,6 +198,11 @@ func (s *Store) BeginEffect(ctx context.Context, job, key string, c EffectBegin)
 	if e != nil {
 		return out, e
 	}
+	// begin may replay a cached external response, so it is a current-owner read
+	// as well as a reservation. Late producers use finish to preserve receipts.
+	if !live {
+		return out, ErrLeaseLost
+	}
 	r, e := s.effect(ctx, tx, job, key)
 	out = EffectReceipt{EffectID: key, ExecutionID: c.ExecutionID, RequestSHA256: n.sha}
 	if errors.Is(e, pgx.ErrNoRows) {
@@ -359,7 +364,7 @@ func (s *Store) EffectStatus(ctx context.Context, job, key string, i AttemptIden
 		return out, e
 	}
 	defer tx.Rollback(ctx)
-	if _, e = s.attemptState(ctx, tx, job, i); e != nil {
+	if e = s.currentAttempt(ctx, tx, job, i); e != nil {
 		return out, e
 	}
 	r, e := s.effect(ctx, tx, job, key)

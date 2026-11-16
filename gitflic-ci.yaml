@@ -1,0 +1,33 @@
+stages:
+  - release
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - when: never
+
+release:
+  stage: release
+  tags: [fleetci]
+  image:
+    name: '$FLEET_CI_IMAGE'
+    pull_policy: never
+  services:
+    - name: postgres:17
+      alias: fleet-ci-postgres
+    - name: rabbitmq:4.2.9
+      alias: fleet-ci-rabbit
+  variables:
+    POSTGRES_USER: fleetci
+    POSTGRES_DB: fleetci
+    POSTGRES_PASSWORD: fixture-only-fleet-ci
+    RABBITMQ_DEFAULT_USER: fleetci
+    RABBITMQ_DEFAULT_PASS: fixture-only-fleet-ci
+    REGISTRY_TEST_DATABASE_URL: postgres://fleetci:fixture-only-fleet-ci@fleet-ci-postgres:5432/fleetci?sslmode=disable
+    FLEET_TEST_AMQP_URL: amqp://fleetci:fixture-only-fleet-ci@fleet-ci-rabbit:5672/
+  script:
+    - python3 -m unittest discover -s ci/tests -v
+    - python3 ci/fleetci.py release --provider gitflic --tag "$CI_COMMIT_TAG"
+  artifacts:
+    when: always
+    paths: [dist/]

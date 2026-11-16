@@ -30,6 +30,16 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/claim", a.claim)
 	mux.HandleFunc("POST /v1/jobs/{id}/heartbeat", a.jobHeartbeat)
 	mux.HandleFunc("POST /v1/jobs/{id}/complete", a.complete)
+	mux.HandleFunc("POST /v1/jobs/{id}/artifacts", a.createArtifact)
+	mux.HandleFunc("GET /v1/artifacts/{id}/status", a.artifactStatus)
+	mux.HandleFunc("GET /v1/artifacts/{id}/content", a.workerArtifactContent)
+	mux.HandleFunc("PUT /v1/artifacts/{id}/chunks/{offset}", a.putArtifactChunk)
+	mux.HandleFunc("POST /v1/artifacts/{id}/finish", a.finishArtifact)
+	mux.HandleFunc("POST /v1/artifacts/{id}/abort", a.abortArtifact)
+	mux.HandleFunc("GET /v1/admin/artifacts/{id}/content", a.artifactContent)
+	mux.HandleFunc("POST /v1/jobs/{id}/effects/{effect}/begin", a.beginEffect)
+	mux.HandleFunc("POST /v1/jobs/{id}/effects/{effect}/finish", a.finishEffect)
+	mux.HandleFunc("GET /v1/jobs/{id}/effects/{effect}/status", a.effectStatus)
 	mux.HandleFunc("GET /v1/admin/workers", a.adminWorkers)
 	mux.HandleFunc("POST /v1/admin/workers", a.registerWorker)
 	mux.HandleFunc("PATCH /v1/admin/workers/{id}", a.workerPolicy)
@@ -78,6 +88,8 @@ func fail(w http.ResponseWriter, e error) {
 		status, code = 409, "idempotency_conflict"
 	case errors.Is(e, ErrLeaseLost):
 		status, code = 409, "lease_lost"
+	case errors.Is(e, ErrUnavailable):
+		status, code = 503, "storage_unavailable"
 	}
 	writeJSON(w, status, map[string]string{"error": code})
 }

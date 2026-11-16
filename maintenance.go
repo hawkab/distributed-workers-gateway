@@ -55,6 +55,7 @@ func (s *Store) RunMaintenance(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.ReconcileCancelled(ctx)
+			s.ReconcileArtifacts(ctx)
 		}
 	}
 }

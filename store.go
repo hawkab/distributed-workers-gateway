@@ -12,9 +12,10 @@ import (
 )
 
 type Store struct {
-	Pool   *pgxpool.Pool
-	Schema string
-	Lease  time.Duration
+	Pool      *pgxpool.Pool
+	Schema    string
+	Lease     time.Duration
+	Artifacts *ArtifactFiles
 }
 
 func NewStore(pool *pgxpool.Pool, schema string) *Store {
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS %[3]s(
  lease_until timestamptz NOT NULL,progress jsonb NOT NULL DEFAULT '{}',completed_at timestamptz,
  completion_hash bytea,receipt jsonb,UNIQUE(job_id,fencing_token));
 CREATE INDEX IF NOT EXISTS attempts_live_worker ON %[3]s(worker_id,lease_until) WHERE status='running';
+ALTER TABLE %[2]s ADD COLUMN IF NOT EXISTS network jsonb NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS jobs_ready ON %[2]s(priority DESC,created_at,id) WHERE status IN('queued','running');
 CREATE TABLE IF NOT EXISTS %[4]s(
  job_id uuid PRIMARY KEY REFERENCES %[2]s(id),attempt_id uuid UNIQUE NOT NULL REFERENCES %[3]s(id),
@@ -73,6 +75,8 @@ CREATE TABLE IF NOT EXISTS %[5]s(
  id uuid PRIMARY KEY,job_id uuid NOT NULL REFERENCES %[2]s(id),attempt_id uuid NOT NULL REFERENCES %[3]s(id),
  worker_id text NOT NULL,status text NOT NULL,result jsonb NOT NULL,error jsonb,completion_hash bytea NOT NULL,
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(attempt_id,completion_hash));
+ALTER TABLE %[4]s ADD COLUMN IF NOT EXISTS artifact_ids text[] NOT NULL DEFAULT '{}';
+ALTER TABLE %[5]s ADD COLUMN IF NOT EXISTS artifact_ids text[] NOT NULL DEFAULT '{}';
 CREATE TABLE IF NOT EXISTS %[6]s(
  event_id uuid PRIMARY KEY,event_type text NOT NULL,payload jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  published_at timestamptz,publish_attempts bigint NOT NULL DEFAULT 0);
@@ -83,7 +87,10 @@ CREATE TABLE IF NOT EXISTS %[7]s(
 CREATE TABLE IF NOT EXISTS %[8]s(
  event_id text NOT NULL,content_hash bytea NOT NULL,payload jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY(event_id,content_hash));`, s.table("workers"), s.table("jobs"), s.table("attempts"), s.table("results"), s.table("candidates"), s.table("outbox"), s.table("inbox"), s.table("inbox_conflicts")))
-	return e
+	if e != nil {
+		return e
+	}
+	return s.initArtifacts(ctx)
 }
 func (s *Store) WorkerByToken(ctx context.Context, token string) (string, error) {
 	var id string
@@ -146,7 +153,11 @@ func (s *Store) enqueue(ctx context.Context, tx pgx.Tx, j EnqueueJob) (string, e
 	id := newID()
 	hash := digest(j)
 	var saved string
-	e := tx.QueryRow(ctx, `INSERT INTO `+s.table("jobs")+`(id,operation,input,script,required_capabilities,priority,idempotency_key,request_hash) VALUES($1,$2,$3,$4,$5,$6,nullif($7,''),$8) ON CONFLICT(idempotency_key) DO NOTHING RETURNING id::text`, id, j.Operation, []byte(j.Input), j.Script, j.RequiredCapabilities, j.Priority, j.IdempotencyKey, hash).Scan(&saved)
+	network := j.Network
+	if len(network) == 0 {
+		network = json.RawMessage(`{}`)
+	}
+	e := tx.QueryRow(ctx, `INSERT INTO `+s.table("jobs")+`(id,operation,input,script,required_capabilities,priority,idempotency_key,request_hash,network) VALUES($1,$2,$3,$4,$5,$6,nullif($7,''),$8,$9) ON CONFLICT(idempotency_key) DO NOTHING RETURNING id::text`, id, j.Operation, []byte(j.Input), j.Script, j.RequiredCapabilities, j.Priority, j.IdempotencyKey, hash, []byte(network)).Scan(&saved)
 	if errors.Is(e, pgx.ErrNoRows) {
 		var old []byte
 		e = tx.QueryRow(ctx, `SELECT id::text,request_hash FROM `+s.table("jobs")+` WHERE idempotency_key=$1`, j.IdempotencyKey).Scan(&saved, &old)

@@ -21,6 +21,7 @@ var (
 	ErrConflict     = errors.New("conflict")
 	ErrLeaseLost    = errors.New("lease_lost")
 	ErrInvalid      = errors.New("invalid_request")
+	ErrUnavailable  = errors.New("storage_unavailable")
 )
 var identifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$`)
 
@@ -95,6 +96,7 @@ type EnqueueJob struct {
 	IdempotencyKey       string          `json:"idempotency_key,omitempty"`
 	Operation            string          `json:"operation"`
 	Input                json.RawMessage `json:"input"`
+	Network              json.RawMessage `json:"network,omitempty"`
 	Script               string          `json:"script,omitempty"`
 	RequiredCapabilities []string        `json:"required_capabilities,omitempty"`
 	Priority             int             `json:"priority,omitempty"`
@@ -116,6 +118,23 @@ func (j EnqueueJob) normalized() (EnqueueJob, error) {
 	if e != nil {
 		return j, e
 	}
+	if len(j.Network) > 0 {
+		if strings.TrimSpace(string(j.Network)) == "null" {
+			j.Network = nil
+		} else {
+			var network map[string]json.RawMessage
+			if json.Unmarshal(j.Network, &network) != nil || network == nil {
+				return j, ErrInvalid
+			}
+			j.Network, e = canonical(j.Network)
+			if e != nil {
+				return j, e
+			}
+			if len(network) == 0 {
+				j.Network = nil
+			}
+		}
+	}
 	if len(j.RequiredCapabilities) == 0 {
 		j.RequiredCapabilities = []string{j.Operation}
 	}
@@ -127,6 +146,7 @@ type ClaimedJob struct {
 	ID           string          `json:"id"`
 	Operation    string          `json:"operation"`
 	Input        json.RawMessage `json:"input"`
+	Network      json.RawMessage `json:"network,omitempty"`
 	Script       string          `json:"script,omitempty"`
 	AttemptID    string          `json:"attempt_id"`
 	FencingToken int64           `json:"fencing_token"`
@@ -149,6 +169,7 @@ type Complete struct {
 	Status       string          `json:"status"`
 	Result       json.RawMessage `json:"result"`
 	Error        json.RawMessage `json:"error,omitempty"`
+	ArtifactIDs  []string        `json:"artifact_ids,omitempty"`
 }
 
 func (c Complete) normalized() (Complete, error) {
@@ -156,6 +177,12 @@ func (c Complete) normalized() (Complete, error) {
 		return c, ErrInvalid
 	}
 	var e error
+	c.ArtifactIDs = sortedUnique(c.ArtifactIDs)
+	for _, id := range c.ArtifactIDs {
+		if !uuidPattern.MatchString(id) {
+			return c, ErrInvalid
+		}
+	}
 	c.Result, e = canonical(c.Result)
 	if e != nil {
 		return c, e

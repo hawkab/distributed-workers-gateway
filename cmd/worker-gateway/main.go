@@ -25,6 +25,12 @@ func main() {
 	}
 	defer pool.Close()
 	store := gateway.NewStore(pool, "worker_fleet")
+	if directory := os.Getenv("WORKER_ARTIFACT_DIR"); directory != "" {
+		store.Artifacts, e = gateway.NewArtifactFiles(directory)
+		if e != nil {
+			log.Fatal("artifact storage initialization failed")
+		}
+	}
 	if e = store.Init(ctx); e != nil {
 		log.Fatal("worker schema initialization failed")
 	}
@@ -42,9 +48,8 @@ func main() {
 	go func() {
 		defer close(done)
 		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		server.Shutdown(shutdown)
+		// Drain active streams; operators can still explicitly force-stop the process.
+		server.Shutdown(context.Background())
 	}()
 	log.Print("worker gateway ready")
 	if e = server.ListenAndServe(); e != nil && e != http.ErrServerClosed {

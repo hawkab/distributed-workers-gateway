@@ -28,12 +28,60 @@ Required environment:
 - `WORKER_AMQP_URL`: optional dedicated fleet broker/vhost connection. When set,
   gateway runs the real outbox publisher and command consumer. When using the
   standalone `fleet-relay`, provide this variable to the relay, not the gateway.
+- `WORKER_ARTIFACT_DIR`: private persistent filesystem for streamed artifacts.
+  Without it, legacy JSON jobs work and artifact writes return 503. The service
+  user needs write access; the directory is never an nginx document root.
 
 The reverse proxy must strip a configured base prefix, e.g. `/fleet`, while
 preserving the relative routes documented in [the protocol contract](https://gitflic.ru/project/distributed-workers/protocol).
 No job execution is tied to the lifetime of an HTTP request. Device requests
-contain only metadata/JSON; current body budget is 16 MiB (APK downloads are
-streamed separately). Large future inputs/results should use artifact references.
+use a 16 MiB JSON control budget. Binary chunk routes stream directly to private
+storage with a fixed copy buffer and no aggregate artifact-size deadline or cap.
+
+## Streamed results and external effects
+
+Create `/v1/jobs/{job}/artifacts` with the attempt identity, stable `key`, optional
+metadata-only `name`, and `media_type`. PUT raw chunks to
+`/v1/artifacts/{upload_id}/chunks/{offset}` with the device bearer token and
+`X-Worker-Id`, `X-Attempt-Id`, `X-Fencing-Token`. An ACK advances `next_offset` only
+after file fsync and PostgreSQL commit. Status returns the durable `offset`,
+`last_segment` and `segments_count`; it does not buffer an unbounded manifest.
+Finish with the exact `length` and optional expected `sha256`. The receipt includes
+`artifact_id`, `name`, `sha256`, `length`, `media_type`, `committed` and
+`candidate_saved`. This seals storage, not the job result. `Complete.artifact_ids`
+is checked against sealed artifacts of the same job and the current job fence.
+
+One-chunk results are hard-linked into content-addressed storage. Multi-chunk
+results are merged with bounded memory. Redundant segments are reclaimed only
+after the complete object and committed PG record are verified. Reconciliation
+recovers interrupted cleanup; duplicate chunk/finish requests return stable ACKs.
+Aborted streams do not publish partial segments. An explicit abort retains already
+acknowledged segments. Stale attempt outputs remain candidates, and a current
+attempt may explicitly adopt a sealed earlier-attempt output of the same job.
+
+`GET /v1/admin/artifacts/{id}/content` requires the admin token. The worker content
+route requires device/attempt headers and permits the original creator or a
+current live attempt of the same job. Neither route exposes filesystem paths.
+Keep PG metadata and artifact storage together when backing up or restoring.
+The filesystem must support atomic hard links and fsync; no expiration deletes
+candidate or canonical objects implicitly.
+
+HTTP effect intents use `/v1/jobs/{job}/effects/{effect_id}/begin` and `/finish`.
+Begin receives an execution UUID and the original request object; the server
+normalizes defaults and headers and returns its request SHA-256. Retrying a lost
+begin RPC with the same live execution UUID preserves the execution grant. A new
+execution cannot repeat an unresolved `never` mutation; it receives `uncertain`.
+Completed responses are replayed across attempts. `safe` is limited to GET/HEAD;
+`idempotent` requires a matching vendor idempotency header and key. Finish checks
+the reserved execution and hash, preserves late candidates and returns a stable
+receipt. HTTP status/body interpretation remains a worker operation.
+
+RabbitMQ receives small artifact/effect/result references. Binary bodies, large
+response metadata and attachment lists stay in file storage/PostgreSQL. Reverse
+proxies must disable request/response buffering for binary routes and remove
+request-size caps there. JSON controls retain their separate budget. The Go
+listener has header/idle protection but no overall read/write deadline, and
+graceful shutdown drains active requests rather than imposing a fixed deadline.
 
 ## Pilot operations
 

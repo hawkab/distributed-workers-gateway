@@ -21,7 +21,7 @@ func (s *Store) Claim(ctx context.Context, worker string, capabilities []string)
 		return nil, e
 	}
 	var j ClaimedJob
-	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,a.id::text,a.fencing_token,a.lease_until FROM `+s.table("jobs")+` j JOIN `+s.table("attempts")+` a ON a.id=j.active_attempt_id WHERE j.status='running' AND a.worker_id=$1 AND a.status='running' AND a.lease_until>clock_timestamp() ORDER BY a.started_at LIMIT 1`, worker).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.AttemptID, &j.FencingToken, &j.LeaseUntil)
+	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,a.id::text,a.fencing_token,a.lease_until,j.network FROM `+s.table("jobs")+` j JOIN `+s.table("attempts")+` a ON a.id=j.active_attempt_id WHERE j.status='running' AND a.worker_id=$1 AND a.status='running' AND a.lease_until>clock_timestamp() ORDER BY a.started_at LIMIT 1`, worker).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.AttemptID, &j.FencingToken, &j.LeaseUntil, &j.Network)
 	if e == nil {
 		return &j, tx.Commit(ctx)
 	}
@@ -29,7 +29,7 @@ func (s *Store) Claim(ctx context.Context, worker string, capabilities []string)
 		return nil, e
 	}
 	var oldAttempt *string
-	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,j.fencing_token,j.active_attempt_id::text FROM `+s.table("jobs")+` j WHERE NOT j.cancel_requested AND j.not_before<=clock_timestamp() AND j.required_capabilities<@$1::text[] AND (j.status='queued' OR(j.status='running' AND EXISTS(SELECT 1 FROM `+s.table("attempts")+` a WHERE a.id=j.active_attempt_id AND a.lease_until<=clock_timestamp()))) ORDER BY j.priority DESC,j.created_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`, sortedUnique(capabilities)).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.FencingToken, &oldAttempt)
+	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,j.fencing_token,j.active_attempt_id::text,j.network FROM `+s.table("jobs")+` j WHERE NOT j.cancel_requested AND j.not_before<=clock_timestamp() AND j.required_capabilities<@$1::text[] AND (j.status='queued' OR(j.status='running' AND EXISTS(SELECT 1 FROM `+s.table("attempts")+` a WHERE a.id=j.active_attempt_id AND a.lease_until<=clock_timestamp()))) ORDER BY j.priority DESC,j.created_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`, sortedUnique(capabilities)).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.FencingToken, &oldAttempt, &j.Network)
 	if errors.Is(e, pgx.ErrNoRows) {
 		if e = tx.Commit(ctx); e != nil {
 			return nil, e
@@ -124,7 +124,8 @@ func (s *Store) Complete(ctx context.Context, job string, request Complete) (Com
 	var current *string
 	var currentFence int64
 	var jobStatus string
-	e = tx.QueryRow(ctx, `SELECT active_attempt_id::text,fencing_token,status FROM `+s.table("jobs")+` WHERE id=$1 FOR UPDATE`, job).Scan(&current, &currentFence, &jobStatus)
+	var cancelRequested bool
+	e = tx.QueryRow(ctx, `SELECT active_attempt_id::text,fencing_token,status,cancel_requested FROM `+s.table("jobs")+` WHERE id=$1 FOR UPDATE`, job).Scan(&current, &currentFence, &jobStatus, &cancelRequested)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return out, ErrNotFound
 	}
@@ -154,9 +155,12 @@ func (s *Store) Complete(ctx context.Context, job string, request Complete) (Com
 		}
 		return out, tx.Commit(ctx)
 	}
-	out.Committed = current != nil && *current == c.AttemptID && currentFence == c.FencingToken && jobStatus == "running" && live
+	if e = s.validateArtifacts(ctx, tx, job, c.ArtifactIDs); e != nil {
+		return out, e
+	}
+	out.Committed = !cancelRequested && current != nil && *current == c.AttemptID && currentFence == c.FencingToken && jobStatus == "running" && live
 	if out.Committed {
-		_, e = tx.Exec(ctx, `INSERT INTO `+s.table("results")+`(job_id,attempt_id,status,result,error,completion_hash) VALUES($1,$2,$3,$4,$5,$6)`, job, c.AttemptID, c.Status, []byte(c.Result), []byte(c.Error), hash)
+		_, e = tx.Exec(ctx, `INSERT INTO `+s.table("results")+`(job_id,attempt_id,status,result,error,completion_hash,artifact_ids) VALUES($1,$2,$3,$4,$5,$6,$7)`, job, c.AttemptID, c.Status, []byte(c.Result), []byte(c.Error), hash, c.ArtifactIDs)
 		if e != nil {
 			return out, e
 		}
@@ -166,7 +170,7 @@ func (s *Store) Complete(ctx context.Context, job string, request Complete) (Com
 		}
 	} else {
 		out.CandidateSaved = true
-		_, e = tx.Exec(ctx, `INSERT INTO `+s.table("candidates")+`(id,job_id,attempt_id,worker_id,status,result,error,completion_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, newID(), job, c.AttemptID, c.WorkerID, c.Status, []byte(c.Result), []byte(c.Error), hash)
+		_, e = tx.Exec(ctx, `INSERT INTO `+s.table("candidates")+`(id,job_id,attempt_id,worker_id,status,result,error,completion_hash,artifact_ids) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, newID(), job, c.AttemptID, c.WorkerID, c.Status, []byte(c.Result), []byte(c.Error), hash, c.ArtifactIDs)
 		if e != nil {
 			return out, e
 		}

@@ -32,6 +32,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/jobs/current", a.currentJob)
 	mux.HandleFunc("POST /v1/workers/heartbeat", a.workerHeartbeat)
 	mux.HandleFunc("POST /v1/jobs/claim", a.claim)
+	mux.HandleFunc("POST /v1/admin/jobs/wait", a.waitJobs)
 	mux.HandleFunc("POST /v1/jobs/{id}/heartbeat", a.jobHeartbeat)
 	mux.HandleFunc("POST /v1/jobs/{id}/complete", a.complete)
 	mux.HandleFunc("POST /v1/jobs/{id}/artifacts", a.createArtifact)
@@ -224,7 +225,10 @@ func (a *API) claim(w http.ResponseWriter, r *http.Request) {
 		fail(w, e)
 		return
 	}
-	job, e := a.Store.ClaimWithProfile(r.Context(), req.WorkerID, caps, profile)
+	if requestedWait(r) > 0 {
+		w.Header().Set("Preference-Applied", "wait=20")
+	}
+	job, e := a.Store.claimWait(r.Context(), req.WorkerID, caps, profile, requestedWait(r))
 	if errors.Is(e, ErrNotFound) {
 		w.WriteHeader(204)
 		return

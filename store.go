@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"regexp"
+	"sync"
 	"time"
 )
 
@@ -16,13 +17,15 @@ type Store struct {
 	Schema    string
 	Lease     time.Duration
 	Artifacts *ArtifactFiles
+	notifyMu  sync.Mutex
+	changed   chan struct{}
 }
 
 func NewStore(pool *pgxpool.Pool, schema string) *Store {
 	if schema == "" {
 		schema = "worker_fleet"
 	}
-	return &Store{Pool: pool, Schema: schema, Lease: 120 * time.Second}
+	return &Store{Pool: pool, Schema: schema, Lease: 120 * time.Second, changed: make(chan struct{})}
 }
 func (s *Store) table(name string) string { return pgx.Identifier{s.Schema, name}.Sanitize() }
 func (s *Store) leaseSeconds() float64 {
@@ -145,6 +148,9 @@ func (s *Store) event(ctx context.Context, tx pgx.Tx, kind string, payload any) 
 		return e
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO `+s.table("outbox")+`(event_id,event_type,payload) VALUES($1,$2,$3)`, newID(), kind, b)
+	if e == nil && kind != "attempt.started" {
+		_, e = tx.Exec(ctx, `SELECT pg_notify($1,$2)`, s.notificationChannel(), kind)
+	}
 	return e
 }
 func (s *Store) Enqueue(ctx context.Context, request EnqueueJob) (string, error) {

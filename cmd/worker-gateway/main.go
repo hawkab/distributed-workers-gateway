@@ -34,6 +34,7 @@ func main() {
 	if e = store.Init(ctx); e != nil {
 		log.Fatal("worker schema initialization failed")
 	}
+	go store.RunNotifications(ctx)
 	go store.RunMaintenance(ctx)
 	api := &gateway.API{Store: store, AdminToken: admin, ReleaseDir: os.Getenv("WORKER_RELEASE_DIR")}
 	if u := os.Getenv("WORKER_AMQP_URL"); u != "" {

@@ -52,6 +52,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/jobs", a.adminJobs)
 	mux.HandleFunc("POST /v1/admin/jobs", a.enqueue)
 	mux.HandleFunc("GET /v1/admin/jobs/{id}", a.adminJob)
+	mux.HandleFunc("GET /v1/admin/jobs/{id}/result", a.jobResult)
 	mux.HandleFunc("POST /v1/admin/jobs/{id}/cancel", a.cancel)
 	mux.HandleFunc("GET /v1/admin/metrics", a.metrics)
 	mux.HandleFunc("POST /v1/admin/events", a.command)

@@ -117,12 +117,18 @@ func (a *API) waitJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	projection := `jsonb_build_object('id',j.id,'status',j.status,'result',(SELECT jsonb_build_object('status',r.status,'result',r.result,'error',r.error) FROM ` + a.Store.table("results") + ` r WHERE r.job_id=j.id))`
+	if strings.Contains(r.Header.Get("Prefer"), "return=minimal") {
+		projection = `jsonb_build_object('id',j.id,'status',j.status,'result_ref','/v1/admin/jobs/'||j.id::text||'/result')`
+		w.Header().Set("Preference-Applied", "return=minimal")
+	}
+	query := `SELECT coalesce(jsonb_agg(` + projection + `),'[]'::jsonb) FROM ` + a.Store.table("jobs") + ` j WHERE j.id=ANY($1::uuid[]) AND j.status IN('succeeded','failed','cancelled')`
 	timer := time.NewTimer(requestedWait(r))
 	defer timer.Stop()
 	for {
 		ch := a.Store.changes()
 		var b []byte
-		e := a.Store.Pool.QueryRow(r.Context(), `SELECT coalesce(jsonb_agg(jsonb_build_object('id',j.id,'status',j.status,'result',(SELECT jsonb_build_object('status',r.status,'result',r.result,'error',r.error) FROM `+a.Store.table("results")+` r WHERE r.job_id=j.id))),'[]'::jsonb) FROM `+a.Store.table("jobs")+` j WHERE j.id=ANY($1::uuid[]) AND j.status IN('succeeded','failed','cancelled')`, req.IDs).Scan(&b)
+		e := a.Store.Pool.QueryRow(r.Context(), query, req.IDs).Scan(&b)
 		if e != nil {
 			fail(w, e)
 			return
@@ -140,4 +146,25 @@ func (a *API) waitJobs(w http.ResponseWriter, r *http.Request) {
 		case <-ch:
 		}
 	}
+}
+
+func (a *API) jobResult(w http.ResponseWriter, r *http.Request) {
+	if !a.admin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if !uuidPattern.MatchString(id) {
+		fail(w, ErrInvalid)
+		return
+	}
+	var b []byte
+	e := a.Store.Pool.QueryRow(r.Context(), `SELECT jsonb_build_object('id',j.id,'status',j.status,'result',(SELECT jsonb_build_object('status',r.status,'result',r.result,'error',r.error) FROM `+a.Store.table("results")+` r WHERE r.job_id=j.id)) FROM `+a.Store.table("jobs")+` j WHERE j.id=$1`, id).Scan(&b)
+	if errors.Is(e, pgx.ErrNoRows) {
+		e = ErrNotFound
+	}
+	if e != nil {
+		fail(w, e)
+		return
+	}
+	writeJSON(w, 200, json.RawMessage(b))
 }

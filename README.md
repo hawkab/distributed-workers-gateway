@@ -185,3 +185,5 @@ vhost and clean up only those objects. They verify an unroutable positive
 confirm without losing the outbox, 25 real unacknowledged redeliveries, command
 idempotence, actual SHA-256 execution and persistent result-event publication.
 Do not pass connection secrets on the command line or record them in test logs.
+
+Queue consumers can send `Prefer: wait=20` to `/v1/jobs/claim` or `/v1/admin/jobs/wait`. Committed PostgreSQL notifications wake waiting requests; idle renewal windows do not limit running computations. Admin consumers should also send `return=minimal` to receive terminal IDs and result references, then read `/v1/admin/jobs/{id}/result` once. This avoids aggregating large results or repeatedly transferring job inputs and history. Binary artifacts remain streamed.

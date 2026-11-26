@@ -80,11 +80,14 @@ func requestedWait(r *http.Request) time.Duration {
 	return 0
 }
 func (s *Store) claimWait(ctx context.Context, worker string, caps []string, p *WorkerProfile, wait time.Duration) (*ClaimedJob, error) {
+	return s.claimSlotWait(ctx, worker, caps, p, 0, wait)
+}
+func (s *Store) claimSlotWait(ctx context.Context, worker string, caps []string, p *WorkerProfile, slot int, wait time.Duration) (*ClaimedJob, error) {
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	for {
 		ch := s.changes()
-		job, e := s.ClaimWithProfile(ctx, worker, caps, p)
+		job, e := s.ClaimSlot(ctx, worker, caps, p, slot)
 		if !errors.Is(e, ErrNotFound) || wait == 0 {
 			return job, e
 		}

@@ -11,6 +11,14 @@ func (s *Store) Claim(ctx context.Context, worker string, capabilities []string)
 	return s.ClaimWithProfile(ctx, worker, capabilities, nil)
 }
 func (s *Store) ClaimWithProfile(ctx context.Context, worker string, capabilities []string, profile *WorkerProfile) (*ClaimedJob, error) {
+	return s.ClaimSlot(ctx, worker, capabilities, profile, 0)
+}
+
+// Slot identity is durable across retries and restarts; reducing admission never cancels live leases.
+func (s *Store) ClaimSlot(ctx context.Context, worker string, capabilities []string, profile *WorkerProfile, slot int) (*ClaimedJob, error) {
+	if slot < 0 {
+		return nil, ErrInvalid
+	}
 	if profile != nil {
 		var e error
 		profile, e = profile.normalized()
@@ -32,12 +40,32 @@ func (s *Store) ClaimWithProfile(ctx context.Context, worker string, capabilitie
 		return nil, e
 	}
 	var j ClaimedJob
-	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,a.id::text,a.fencing_token,a.lease_until,j.network,j.resource_requirements FROM `+s.table("jobs")+` j JOIN `+s.table("attempts")+` a ON a.id=j.active_attempt_id WHERE j.status='running' AND a.worker_id=$1 AND a.status='running' AND a.lease_until>clock_timestamp() ORDER BY a.started_at LIMIT 1`, worker).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.AttemptID, &j.FencingToken, &j.LeaseUntil, &j.Network, &j.ResourceRequirements)
+	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,a.id::text,a.fencing_token,a.lease_until,j.network,j.resource_requirements FROM `+s.table("jobs")+` j JOIN `+s.table("attempts")+` a ON a.id=j.active_attempt_id WHERE j.status='running' AND a.worker_id=$1 AND a.slot_id=$2 AND a.status='running' AND a.lease_until>clock_timestamp() ORDER BY a.started_at LIMIT 1`, worker, slot).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.AttemptID, &j.FencingToken, &j.LeaseUntil, &j.Network, &j.ResourceRequirements)
 	if e == nil {
 		return &j, tx.Commit(ctx)
 	}
 	if !errors.Is(e, pgx.ErrNoRows) {
 		return nil, e
+	}
+	slots := 1
+	if profile != nil && profile.Execution != nil {
+		slots = profile.Execution.MaxConcurrentJobs
+	}
+	if slot >= slots {
+		if e = tx.Commit(ctx); e != nil {
+			return nil, e
+		}
+		return nil, ErrNotFound
+	}
+	var active int
+	if e = tx.QueryRow(ctx, `SELECT count(*) FROM `+s.table("attempts")+` WHERE worker_id=$1 AND status='running' AND lease_until>clock_timestamp()`, worker).Scan(&active); e != nil {
+		return nil, e
+	}
+	if active >= slots {
+		if e = tx.Commit(ctx); e != nil {
+			return nil, e
+		}
+		return nil, ErrNotFound
 	}
 	var oldAttempt *string
 	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,j.fencing_token,j.active_attempt_id::text,j.network,j.resource_requirements FROM `+s.table("jobs")+` j WHERE NOT j.cancel_requested AND j.not_before<=clock_timestamp() AND j.required_capabilities<@$1::text[] AND `+s.table("resources_match")+`($2::jsonb,j.resource_requirements) AND (j.status='queued' OR(j.status='running' AND EXISTS(SELECT 1 FROM `+s.table("attempts")+` a WHERE a.id=j.active_attempt_id AND a.lease_until<=clock_timestamp()))) ORDER BY j.priority DESC,j.created_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`, sortedUnique(capabilities), profileBytes(profile)).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.FencingToken, &oldAttempt, &j.Network, &j.ResourceRequirements)
@@ -61,7 +89,7 @@ func (s *Store) ClaimWithProfile(ctx context.Context, worker string, capabilitie
 	}
 	j.FencingToken++
 	j.AttemptID = newID()
-	e = tx.QueryRow(ctx, `INSERT INTO `+s.table("attempts")+`(id,job_id,worker_id,fencing_token,lease_until) VALUES($1,$2,$3,$4,clock_timestamp()+$5::double precision*interval '1 second') RETURNING lease_until`, j.AttemptID, j.ID, worker, j.FencingToken, s.leaseSeconds()).Scan(&j.LeaseUntil)
+	e = tx.QueryRow(ctx, `INSERT INTO `+s.table("attempts")+`(id,job_id,worker_id,fencing_token,lease_until,slot_id) VALUES($1,$2,$3,$4,clock_timestamp()+$5::double precision*interval '1 second',$6) RETURNING lease_until`, j.AttemptID, j.ID, worker, j.FencingToken, s.leaseSeconds(), slot).Scan(&j.LeaseUntil)
 	if e != nil {
 		return nil, e
 	}

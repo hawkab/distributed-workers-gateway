@@ -32,7 +32,14 @@ type WorkerResources struct {
 	GPUStatus          string        `json:"gpu_status"`
 	GPUs               []GPUResource `json:"gpus"`
 }
+type ExecutionBudget struct {
+	MaxConcurrentJobs  int      `json:"max_concurrent_jobs"`
+	Mode               string   `json:"mode,omitempty"`
+	CPUUtilization     *float64 `json:"cpu_utilization,omitempty"`
+	MemoryReserveBytes int64    `json:"memory_reserve_bytes,omitempty"`
+}
 type WorkerProfile struct {
+	Execution    *ExecutionBudget `json:"execution,omitempty"`
 	Schema       int              `json:"schema"`
 	Capabilities []string         `json:"capabilities"`
 	Resources    *WorkerResources `json:"resources"`
@@ -85,6 +92,12 @@ func (r ResourceRequirements) validate() error {
 func (p *WorkerProfile) normalized() (*WorkerProfile, error) {
 	if p == nil || p.Schema != 1 || p.Capabilities == nil || p.Resources == nil {
 		return nil, ErrInvalid
+	}
+	if p.Execution != nil {
+		e := *p.Execution
+		if e.MaxConcurrentJobs < 0 || e.MemoryReserveBytes < 0 || e.CPUUtilization != nil && (math.IsNaN(*e.CPUUtilization) || math.IsInf(*e.CPUUtilization, 0) || *e.CPUUtilization < 0 || *e.CPUUtilization > 1) {
+			return nil, ErrInvalid
+		}
 	}
 	// Store APIs may receive the same profile from concurrent callers. Normalize
 	// a private copy instead of rewriting caller-owned capabilities/resources.

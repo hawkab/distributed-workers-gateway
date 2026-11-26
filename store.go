@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS %[3]s(
  started_at timestamptz NOT NULL DEFAULT clock_timestamp(),last_heartbeat_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  lease_until timestamptz NOT NULL,progress jsonb NOT NULL DEFAULT '{}',completed_at timestamptz,
  completion_hash bytea,receipt jsonb,UNIQUE(job_id,fencing_token));
+ALTER TABLE %[3]s ADD COLUMN IF NOT EXISTS slot_id integer NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS attempts_live_slot ON %[3]s(worker_id,slot_id,lease_until) WHERE status='running';
 CREATE INDEX IF NOT EXISTS attempts_live_worker ON %[3]s(worker_id,lease_until) WHERE status='running';
 ALTER TABLE %[2]s ADD COLUMN IF NOT EXISTS network jsonb NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS jobs_ready ON %[2]s(priority DESC,created_at,id) WHERE status IN('queued','running');

@@ -187,3 +187,12 @@ idempotence, actual SHA-256 execution and persistent result-event publication.
 Do not pass connection secrets on the command line or record them in test logs.
 
 Queue consumers can send `Prefer: wait=20` to `/v1/jobs/claim` or `/v1/admin/jobs/wait`. Committed PostgreSQL notifications wake waiting requests; idle renewal windows do not limit running computations. Admin consumers should also send `return=minimal` to receive terminal IDs and result references, then read `/v1/admin/jobs/{id}/result` once. This avoids aggregating large results or repeatedly transferring job inputs and history. Binary artifacts remain streamed.
+
+### Adaptive execution slots
+
+Claims support `slot_id`, defaulting to zero. An optional profile `execution`
+budget controls simultaneous admission without changing the worker identity.
+Repeating a claim recovers only that slot's live attempt. Zero pauses new
+admission and does not cancel a lease. Legacy profiles retain single-slot
+behavior. Startup adds the slot column and live-slot index to the dedicated
+worker schema; all existing attempts migrate to slot zero.

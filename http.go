@@ -211,6 +211,7 @@ func (a *API) workerHeartbeat(w http.ResponseWriter, r *http.Request) {
 func (a *API) claim(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		WorkerID     string          `json:"worker_id"`
+		SlotID       int             `json:"slot_id,omitempty"`
 		Capabilities json.RawMessage `json:"capabilities"`
 	}
 	if !a.decode(w, r, &req) || !a.device(w, r, req.WorkerID) {
@@ -229,7 +230,7 @@ func (a *API) claim(w http.ResponseWriter, r *http.Request) {
 	if requestedWait(r) > 0 {
 		w.Header().Set("Preference-Applied", "wait=20")
 	}
-	job, e := a.Store.claimWait(r.Context(), req.WorkerID, caps, profile, requestedWait(r))
+	job, e := a.Store.claimSlotWait(r.Context(), req.WorkerID, caps, profile, req.SlotID, requestedWait(r))
 	if errors.Is(e, ErrNotFound) {
 		w.WriteHeader(204)
 		return

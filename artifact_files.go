@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 )
 
 // ArtifactFiles is private server storage. Only opaque IDs/hashes enter receipts.
@@ -50,6 +51,10 @@ type contextArtifactReader struct {
 	r   io.Reader
 }
 
+// Reuse a bounded scratch buffer per concurrent stream. sync.Pool releases idle
+// buffers under GC; memory never grows with file length or retained artifacts.
+var artifactCopyBuffers = sync.Pool{New: func() any { return new([32 * 1024]byte) }}
+
 func (r contextArtifactReader) Read(p []byte) (int, error) {
 	if e := r.ctx.Err(); e != nil {
 		return 0, e
@@ -58,7 +63,9 @@ func (r contextArtifactReader) Read(p []byte) (int, error) {
 }
 func copyArtifact(ctx context.Context, w io.Writer, r io.Reader) (string, int64, error) {
 	h := sha256.New()
-	n, e := io.CopyBuffer(io.MultiWriter(w, h), contextArtifactReader{ctx, r}, make([]byte, 32*1024))
+	buffer := artifactCopyBuffers.Get().(*[32 * 1024]byte)
+	defer artifactCopyBuffers.Put(buffer)
+	n, e := io.CopyBuffer(io.MultiWriter(w, h), contextArtifactReader{ctx, r}, buffer[:])
 	if e == nil {
 		e = ctx.Err()
 	}

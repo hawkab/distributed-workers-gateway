@@ -1,0 +1,71 @@
+Gateway efficiency review, 2026-11-28
+
+The execution protocol, fences, leases, result/candidate receipts and durable
+broker outbox remain unchanged. No worker concurrency policy, request rate cap,
+execution deadline or artifact size cap is introduced.
+
+Changes
+1. Pending artifact cleanup has a partial UUID index containing only sealed,
+   uncleaned uploads. The keyset cursor orders the UUID input column, not the
+   projected text alias. Historical uploads are retained but are no longer
+   scanned and sorted for every cleanup lookup. Recent-job listing also gets
+   an index matching its actual ORDER BY.
+2. Resource matching returns immediately for unconstrained jobs. Constrained
+   CPU/GPU/unified-memory decisions keep the exact existing numeric semantics.
+   Claim selection uses CASE to avoid evaluating resources for an unexpired
+   lease. Priority order, SKIP LOCKED and clock_timestamp expiry checks remain.
+3. Claims and terminal-result observers have separate lazy change channels.
+   Artifact/effect events remain in the durable outbox but do not cause irrelevant
+   claim transactions. Actual terminal events are job.succeeded/job.failed,
+   job.cancelled and job.cancel_requested (queued cancellation is immediately
+   terminal). A notification reconnect still wakes every reader to reconcile
+   missed commits. The existing idle HTTP renewal window is not a task deadline.
+4. Profile normalization/encoding is prepared once per waiting claim request;
+   notification retries reuse that immutable request instead of rebuilding it.
+5. Binary artifact streams already use bounded one-pass copy+SHA256. Reuse the
+   32 KiB scratch buffer through sync.Pool; GC can reclaim idle buffers. Memory
+   depends on simultaneous copies, not file length. Downloads still use
+   ServeContent (including ranges) and no aggregate byte limit is added.
+
+Measurements
+The production cleanup lookup previously scanned roughly 848,000 historical
+uploads: 2,027.354 ms and 54,010 reads outside PostgreSQL shared_buffers.
+The indexed UUID lookup measured 0.495 ms, zero shared reads and 10 shared hits.
+These are single diagnostic SELECTs, not a load test or a throughput guarantee.
+Shared reads can be satisfied by the OS cache and are not all physical disk I/O.
+
+Local isolated PostgreSQL/RabbitMQ tests and three benchmark samples:
+  Copy/hash ~1 MiB: 33,194 -> 437 allocated bytes/op, 9 -> 8 allocations/op.
+  Copy throughput stayed near 2.5 GB/s; no material CPU speedup is claimed.
+  An empty claim with 59 live leased jobs: median 4.053 -> 3.836 ms/op,
+  roughly 5,570 -> 5,490 bytes/op and 82 -> 80 allocations/op.
+  These SQL benchmark numbers include local round trips; they do not represent
+  a server's maximum request rate. Expensive per-row and spurious wakeups were
+  checked separately from the small per-request Go allocation improvement.
+
+Validation
+  go test -race -json -timeout=0 -count=1 ./... against disposable PostgreSQL
+  and RabbitMQ: 68 test/subtest passes, zero failures and zero skips.
+  New regression cases exercise real Complete/Cancel commits over PG LISTEN/
+  NOTIFY, not just manually invented event labels. They protect prompt terminal
+  wakeups and queued cancellation. Another case makes resource matching fail
+  if evaluated on a live leased job; the next eligible job must still be claimed.
+  Existing tests cover concurrent artifact streams, resume/dedup, stale fences,
+  partial/cancelled transfers, broker confirms, permissions and lease recovery.
+
+Review corrections retained in the operator audit
+An intermediate filter used an invented job.completed label. Review caught it;
+the filter was corrected to the producer's real terminal events and real-commit
+regressions added. An intermediate rollout could delay terminal observers until
+their idle renewal; it did not delete jobs/results or revoke leases. The accepted
+release is the corrected build and passed the real-commit regression suite.
+
+Rollout
+Online indexes and an equivalent matcher are applied before starting the new
+binary. An identical temporary service shares the fenced ledger while ingress
+switches to it; the primary drains current streams. Ingress returns to the new
+primary, then the temporary service drains and is removed. Database contents,
+worker policies and upstream application services are retained.
+
+Deployment addresses, credentials, host measurements and rollback files belong
+only in the private operator workspace and are intentionally absent here.

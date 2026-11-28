@@ -27,13 +27,41 @@ func (s *Store) changes() <-chan struct{} {
 	}
 	return s.changed
 }
+func (s *Store) claimChanges() <-chan struct{} {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	if s.claimChanged == nil {
+		s.claimChanged = make(chan struct{})
+	}
+	return s.claimChanged
+}
+func claimEvent(kind string) bool { return kind == "job.queued" || resultEvent(kind) }
+func resultEvent(kind string) bool {
+	// Complete emits the actual terminal status. Cancelling a queued job makes
+	// it terminal immediately, although its event is job.cancel_requested.
+	return kind == "job.succeeded" || kind == "job.failed" || kind == "job.cancelled" || kind == "job.cancel_requested"
+}
+func closeChange(ch *chan struct{}) {
+	if *ch != nil {
+		close(*ch)
+		*ch = nil
+	}
+}
 func (s *Store) notify() {
 	s.notifyMu.Lock()
 	defer s.notifyMu.Unlock()
-	if s.changed != nil {
-		close(s.changed)
+	closeChange(&s.changed)
+	closeChange(&s.claimChanged)
+}
+func (s *Store) notifyEvent(kind string) {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	if resultEvent(kind) {
+		closeChange(&s.changed)
 	}
-	s.changed = make(chan struct{})
+	if claimEvent(kind) {
+		closeChange(&s.claimChanged)
+	}
 }
 func (s *Store) RunNotifications(ctx context.Context) {
 	for ctx.Err() == nil {
@@ -44,10 +72,11 @@ func (s *Store) RunNotifications(ctx context.Context) {
 		s.notify()
 		if e == nil {
 			for ctx.Err() == nil {
-				if _, e = conn.WaitForNotification(ctx); e != nil {
+				notification, err := conn.WaitForNotification(ctx)
+				if e = err; e != nil {
 					break
 				}
-				s.notify()
+				s.notifyEvent(notification.Payload)
 			}
 		}
 		if conn != nil {
@@ -83,11 +112,15 @@ func (s *Store) claimWait(ctx context.Context, worker string, caps []string, p *
 	return s.claimSlotWait(ctx, worker, caps, p, 0, wait)
 }
 func (s *Store) claimSlotWait(ctx context.Context, worker string, caps []string, p *WorkerProfile, slot int, wait time.Duration) (*ClaimedJob, error) {
+	request, err := prepareClaim(worker, caps, p, slot)
+	if err != nil {
+		return nil, err
+	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	for {
-		ch := s.changes()
-		job, e := s.ClaimSlot(ctx, worker, caps, p, slot)
+		ch := s.claimChanges()
+		job, e := s.claimPreparedSlot(ctx, request)
 		if !errors.Is(e, ErrNotFound) || wait == 0 {
 			return job, e
 		}

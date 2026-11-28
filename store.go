@@ -13,19 +13,20 @@ import (
 )
 
 type Store struct {
-	Pool      *pgxpool.Pool
-	Schema    string
-	Lease     time.Duration
-	Artifacts *ArtifactFiles
-	notifyMu  sync.Mutex
-	changed   chan struct{}
+	Pool         *pgxpool.Pool
+	Schema       string
+	Lease        time.Duration
+	Artifacts    *ArtifactFiles
+	notifyMu     sync.Mutex
+	changed      chan struct{}
+	claimChanged chan struct{}
 }
 
 func NewStore(pool *pgxpool.Pool, schema string) *Store {
 	if schema == "" {
 		schema = "worker_fleet"
 	}
-	return &Store{Pool: pool, Schema: schema, Lease: 120 * time.Second, changed: make(chan struct{})}
+	return &Store{Pool: pool, Schema: schema, Lease: 120 * time.Second}
 }
 func (s *Store) table(name string) string { return pgx.Identifier{s.Schema, name}.Sanitize() }
 func (s *Store) leaseSeconds() float64 {
@@ -73,6 +74,7 @@ CREATE INDEX IF NOT EXISTS attempts_live_slot ON %[3]s(worker_id,slot_id,lease_u
 CREATE INDEX IF NOT EXISTS attempts_live_worker ON %[3]s(worker_id,lease_until) WHERE status='running';
 ALTER TABLE %[2]s ADD COLUMN IF NOT EXISTS network jsonb NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS jobs_ready ON %[2]s(priority DESC,created_at,id) WHERE status IN('queued','running');
+CREATE INDEX IF NOT EXISTS jobs_recent ON %[2]s(created_at DESC,id);
 CREATE TABLE IF NOT EXISTS %[4]s(
  job_id uuid PRIMARY KEY REFERENCES %[2]s(id),attempt_id uuid UNIQUE NOT NULL REFERENCES %[3]s(id),
  status text NOT NULL,result jsonb NOT NULL,error jsonb,completion_hash bytea NOT NULL,created_at timestamptz NOT NULL DEFAULT clock_timestamp());
@@ -150,7 +152,7 @@ func (s *Store) event(ctx context.Context, tx pgx.Tx, kind string, payload any) 
 		return e
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO `+s.table("outbox")+`(event_id,event_type,payload) VALUES($1,$2,$3)`, newID(), kind, b)
-	if e == nil && kind != "attempt.started" {
+	if e == nil && (claimEvent(kind) || resultEvent(kind)) {
 		_, e = tx.Exec(ctx, `SELECT pg_notify($1,$2)`, s.notificationChannel(), kind)
 	}
 	return e

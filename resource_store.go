@@ -14,7 +14,12 @@ CREATE TABLE IF NOT EXISTS %[3]s(
  token_hash bytea PRIMARY KEY,worker_id text UNIQUE REFERENCES %[1]s(id),
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),connected_at timestamptz);
 CREATE OR REPLACE FUNCTION %[4]s(p jsonb,r jsonb) RETURNS boolean
-LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fleet_resource_match$
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $fleet_resource_match$
+BEGIN
+ -- The common unqualified job requires no GPU enumeration, numeric casts or
+ -- SQL expression tree. Preserve the full exact matcher for real constraints.
+ IF r IS NULL OR r = '{}'::jsonb THEN RETURN true; END IF;
+ RETURN (
  WITH req AS (
   SELECT coalesce((r->>'cpu_cores')::numeric,0) cpu,
    coalesce((r->>'ram_bytes')::numeric,0) ram,
@@ -38,6 +43,8 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fleet_resource_match$
   AND (req.ram+greatest(0,req.needed-totals.dedicated)*req.memory=0
    OR (p->'resources'->>'ram_available_bytes')::numeric>=req.ram+greatest(0,req.needed-totals.dedicated)*req.memory)
  ,false) FROM req,totals
+ );
+END;
 $fleet_resource_match$;
 `, s.table("workers"), s.table("jobs"), s.table("worker_enrollments"), s.table("resources_match")))
 	return e

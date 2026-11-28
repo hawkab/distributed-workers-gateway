@@ -16,17 +16,45 @@ func (s *Store) ClaimWithProfile(ctx context.Context, worker string, capabilitie
 
 // Slot identity is durable across retries and restarts; reducing admission never cancels live leases.
 func (s *Store) ClaimSlot(ctx context.Context, worker string, capabilities []string, profile *WorkerProfile, slot int) (*ClaimedJob, error) {
+	request, e := prepareClaim(worker, capabilities, profile, slot)
+	if e != nil {
+		return nil, e
+	}
+	return s.claimPreparedSlot(ctx, request)
+}
+
+type preparedClaim struct {
+	worker       string
+	capabilities []string
+	profile      []byte
+	slot, slots  int
+}
+
+// Immutable per request, shared by notification retries rather than allocating
+// and serializing the same profile on every wakeup.
+func prepareClaim(worker string, capabilities []string, profile *WorkerProfile, slot int) (preparedClaim, error) {
+	request := preparedClaim{worker: worker, slot: slot, slots: 1}
 	if slot < 0 {
-		return nil, ErrInvalid
+		return request, ErrInvalid
 	}
 	if profile != nil {
 		var e error
 		profile, e = profile.normalized()
 		if e != nil {
-			return nil, e
+			return request, e
 		}
 		capabilities = profile.Capabilities
+		if profile.Execution != nil {
+			request.slots = profile.Execution.MaxConcurrentJobs
+		}
 	}
+	request.capabilities = sortedUnique(capabilities)
+	request.profile = profileBytes(profile)
+	return request, nil
+}
+
+func (s *Store) claimPreparedSlot(ctx context.Context, request preparedClaim) (*ClaimedJob, error) {
+	worker, slot := request.worker, request.slot
 	tx, e := s.Pool.Begin(ctx)
 	if e != nil {
 		return nil, e
@@ -35,7 +63,7 @@ func (s *Store) ClaimSlot(ctx context.Context, worker string, capabilities []str
 	if e = s.lockWorker(ctx, tx, worker); e != nil {
 		return nil, e
 	}
-	_, e = tx.Exec(ctx, `UPDATE `+s.table("workers")+` SET capabilities=$2,last_seen_at=clock_timestamp(),profile=CASE WHEN $3::jsonb IS NULL THEN profile ELSE $3::jsonb END,profile_observed_at=CASE WHEN $3::jsonb IS NULL THEN profile_observed_at ELSE clock_timestamp() END WHERE id=$1`, worker, sortedUnique(capabilities), profileBytes(profile))
+	_, e = tx.Exec(ctx, `UPDATE `+s.table("workers")+` SET capabilities=$2,last_seen_at=clock_timestamp(),profile=CASE WHEN $3::jsonb IS NULL THEN profile ELSE $3::jsonb END,profile_observed_at=CASE WHEN $3::jsonb IS NULL THEN profile_observed_at ELSE clock_timestamp() END WHERE id=$1`, worker, request.capabilities, request.profile)
 	if e != nil {
 		return nil, e
 	}
@@ -47,10 +75,7 @@ func (s *Store) ClaimSlot(ctx context.Context, worker string, capabilities []str
 	if !errors.Is(e, pgx.ErrNoRows) {
 		return nil, e
 	}
-	slots := 1
-	if profile != nil && profile.Execution != nil {
-		slots = profile.Execution.MaxConcurrentJobs
-	}
+	slots := request.slots
 	if slot >= slots {
 		if e = tx.Commit(ctx); e != nil {
 			return nil, e
@@ -68,7 +93,7 @@ func (s *Store) ClaimSlot(ctx context.Context, worker string, capabilities []str
 		return nil, ErrNotFound
 	}
 	var oldAttempt *string
-	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,j.fencing_token,j.active_attempt_id::text,j.network,j.resource_requirements FROM `+s.table("jobs")+` j WHERE NOT j.cancel_requested AND j.not_before<=clock_timestamp() AND j.required_capabilities<@$1::text[] AND `+s.table("resources_match")+`($2::jsonb,j.resource_requirements) AND (j.status='queued' OR(j.status='running' AND EXISTS(SELECT 1 FROM `+s.table("attempts")+` a WHERE a.id=j.active_attempt_id AND a.lease_until<=clock_timestamp()))) ORDER BY j.priority DESC,j.created_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`, sortedUnique(capabilities), profileBytes(profile)).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.FencingToken, &oldAttempt, &j.Network, &j.ResourceRequirements)
+	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,j.fencing_token,j.active_attempt_id::text,j.network,j.resource_requirements FROM `+s.table("jobs")+` j WHERE NOT j.cancel_requested AND j.status IN ('queued','running') AND j.not_before<=clock_timestamp() AND j.required_capabilities<@$1::text[] AND CASE WHEN j.status='queued' OR EXISTS(SELECT 1 FROM `+s.table("attempts")+` a WHERE a.id=j.active_attempt_id AND a.lease_until<=clock_timestamp()) THEN `+s.table("resources_match")+`($2::jsonb,j.resource_requirements) ELSE false END ORDER BY j.priority DESC,j.created_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`, request.capabilities, request.profile).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.FencingToken, &oldAttempt, &j.Network, &j.ResourceRequirements)
 	if errors.Is(e, pgx.ErrNoRows) {
 		if e = tx.Commit(ctx); e != nil {
 			return nil, e

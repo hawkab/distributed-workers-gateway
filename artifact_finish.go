@@ -290,7 +290,9 @@ func (s *Store) ReconcileArtifacts(ctx context.Context) error {
 	last := "00000000-0000-0000-0000-000000000000"
 	for {
 		var id string
-		e := s.Pool.QueryRow(ctx, `SELECT id::text FROM `+s.table("artifact_uploads")+` WHERE status='sealed' AND NOT chunks_cleaned AND id>$1::uuid ORDER BY id LIMIT 1`, last).Scan(&id)
+		// Qualify the UUID input column: unqualified ORDER BY id resolves the
+		// projected id::text alias and prevents the UUID index providing order.
+		e := s.Pool.QueryRow(ctx, `SELECT u.id::text FROM `+s.table("artifact_uploads")+` u WHERE u.status='sealed' AND NOT u.chunks_cleaned AND u.id>$1::uuid ORDER BY u.id LIMIT 1`, last).Scan(&id)
 		if errors.Is(e, pgx.ErrNoRows) {
 			return nil
 		}

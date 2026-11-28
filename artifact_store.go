@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS %[5]s(
  upload_id uuid NOT NULL REFERENCES %[1]s(id),byte_offset bigint NOT NULL,length bigint NOT NULL CHECK(length>0),sha256 text NOT NULL,
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),PRIMARY KEY(upload_id,byte_offset));
 CREATE INDEX IF NOT EXISTS artifact_job ON %[1]s(job_id);
+CREATE INDEX IF NOT EXISTS artifact_cleanup_pending ON %[1]s(id) WHERE status='sealed' AND NOT chunks_cleaned;
 CREATE TABLE IF NOT EXISTS %[6]s(
  job_id uuid NOT NULL REFERENCES %[2]s(id),effect_id text NOT NULL,request_sha256 text NOT NULL,replay_policy text NOT NULL,
  method text NOT NULL,idempotency_header text NOT NULL DEFAULT '',idempotency_key_hash bytea,

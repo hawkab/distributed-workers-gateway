@@ -94,7 +94,10 @@ CREATE TABLE IF NOT EXISTS %[7]s(
  receipt jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT clock_timestamp());
 CREATE TABLE IF NOT EXISTS %[8]s(
  event_id text NOT NULL,content_hash bytea NOT NULL,payload jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
- PRIMARY KEY(event_id,content_hash));`, s.table("workers"), s.table("jobs"), s.table("attempts"), s.table("results"), s.table("candidates"), s.table("outbox"), s.table("inbox"), s.table("inbox_conflicts")))
+ PRIMARY KEY(event_id,content_hash));
+CREATE TABLE IF NOT EXISTS %[9]s (
+ job_id uuid PRIMARY KEY REFERENCES %[2]s(id), operation_id uuid UNIQUE NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp());`, s.table("workers"), s.table("jobs"), s.table("attempts"), s.table("results"), s.table("candidates"), s.table("outbox"), s.table("inbox"), s.table("inbox_conflicts"), s.table("unclaimed_withdrawals")))
 	if e != nil {
 		return e
 	}

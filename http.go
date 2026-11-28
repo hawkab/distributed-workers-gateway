@@ -62,6 +62,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/admin/jobs/{id}", a.adminJob)
 	mux.HandleFunc("GET /v1/admin/jobs/{id}/result", a.jobResult)
 	mux.HandleFunc("POST /v1/admin/jobs/{id}/cancel", a.cancel)
+	mux.HandleFunc("POST /v1/admin/jobs/{id}/withdraw-unclaimed", a.withdrawUnclaimed)
 	mux.HandleFunc("GET /v1/admin/metrics", a.metrics)
 	mux.HandleFunc("POST /v1/admin/events", a.command)
 	mux.HandleFunc("GET /releases/android-stable/{name}", a.release)

@@ -15,6 +15,13 @@ Changes
    Claim selection uses CASE to avoid evaluating resources for an unexpired
    lease. Priority order, SKIP LOCKED and clock_timestamp expiry checks remain.
 3. Claims and terminal-result observers have separate lazy change channels.
+   Pending claims share a reference-counted signal per worker. A committed
+   completion wakes only that worker's claims (its slot budget may now permit
+   work), not every idle slot on every machine. Enqueue and reconnect still
+   reconcile all waiting workers. Releasing the last waiter removes its entry;
+   the entire map is released when empty. Zero-wait claims allocate no timer or
+   observer. A separate internal PG channel carries worker-availability hints;
+   existing terminal event payloads remain intact through rolling upgrades.
    Artifact/effect events remain in the durable outbox but do not cause irrelevant
    claim transactions. Actual terminal events are job.succeeded/job.failed,
    job.cancelled and job.cancel_requested (queued cancellation is immediately
@@ -45,13 +52,16 @@ Local isolated PostgreSQL/RabbitMQ tests and three benchmark samples:
 
 Validation
   go test -race -json -timeout=0 -count=1 ./... against disposable PostgreSQL
-  and RabbitMQ: 68 test/subtest passes, zero failures and zero skips.
+  and RabbitMQ: 69 test/subtest passes, zero failures and zero skips.
   New regression cases exercise real Complete/Cancel commits over PG LISTEN/
   NOTIFY, not just manually invented event labels. They protect prompt terminal
   wakeups and queued cancellation. Another case makes resource matching fail
   if evaluated on a live leased job; the next eligible job must still be claimed.
   Existing tests cover concurrent artifact streams, resume/dedup, stale fences,
   partial/cancelled transfers, broker confirms, permissions and lease recovery.
+  Worker isolation and reference cleanup are checked. The real-event test waits
+  for enqueue delivery before asserting that later completion did not awaken an
+  unrelated worker, so delayed setup notifications cannot create a false failure.
 
 Review corrections retained in the operator audit
 An intermediate filter used an invented job.completed label. Review caught it;

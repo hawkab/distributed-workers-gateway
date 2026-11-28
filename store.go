@@ -19,7 +19,7 @@ type Store struct {
 	Artifacts    *ArtifactFiles
 	notifyMu     sync.Mutex
 	changed      chan struct{}
-	claimChanged chan struct{}
+	claimWaiters map[string]*claimWatch
 }
 
 func NewStore(pool *pgxpool.Pool, schema string) *Store {

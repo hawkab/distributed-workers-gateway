@@ -268,6 +268,13 @@ func (s *Store) Complete(ctx context.Context, job string, request Complete) (Com
 	if e = s.event(ctx, tx, event, map[string]any{"job_id": job, "attempt_id": c.AttemptID, "status": c.Status, "committed": out.Committed, "candidate_saved": out.CandidateSaved, "result_ref": "/v1/admin/jobs/" + job}); e != nil {
 		return out, e
 	}
+	if out.Committed {
+		// Releasing a live slot can unblock this worker's reduced concurrency
+		// budget. Other idle workers gain no eligible job from a completion.
+		if _, e = tx.Exec(ctx, `SELECT pg_notify($1,$2)`, s.claimNotificationChannel(), c.WorkerID); e != nil {
+			return out, e
+		}
+	}
 	return out, tx.Commit(ctx)
 }
 func (s *Store) Cancel(ctx context.Context, job string) error {

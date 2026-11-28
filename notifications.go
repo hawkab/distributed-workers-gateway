@@ -27,15 +27,52 @@ func (s *Store) changes() <-chan struct{} {
 	}
 	return s.changed
 }
-func (s *Store) claimChanges() <-chan struct{} {
+
+type claimWatch struct {
+	changed chan struct{}
+	readers int
+}
+
+func (s *Store) watchClaims(worker string) *claimWatch {
 	s.notifyMu.Lock()
 	defer s.notifyMu.Unlock()
-	if s.claimChanged == nil {
-		s.claimChanged = make(chan struct{})
+	if s.claimWaiters == nil {
+		s.claimWaiters = make(map[string]*claimWatch)
 	}
-	return s.claimChanged
+	watch := s.claimWaiters[worker]
+	if watch == nil {
+		watch = &claimWatch{changed: make(chan struct{})}
+		s.claimWaiters[worker] = watch
+	}
+	watch.readers++
+	return watch
 }
-func claimEvent(kind string) bool { return kind == "job.queued" || resultEvent(kind) }
+func (s *Store) unwatchClaims(worker string, watch *claimWatch) {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	watch.readers--
+	if watch.readers == 0 {
+		delete(s.claimWaiters, worker)
+	}
+	if len(s.claimWaiters) == 0 {
+		s.claimWaiters = nil
+	}
+}
+func (s *Store) claimChanges(watch *claimWatch) <-chan struct{} {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	return watch.changed
+}
+func signalClaim(watch *claimWatch) { close(watch.changed); watch.changed = make(chan struct{}) }
+func (s *Store) notifyWorker(worker string) {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	if watch := s.claimWaiters[worker]; watch != nil {
+		signalClaim(watch)
+	}
+}
+func (s *Store) claimNotificationChannel() string { return s.notificationChannel() + "_claims" }
+func claimEvent(kind string) bool                 { return kind == "job.queued" }
 func resultEvent(kind string) bool {
 	// Complete emits the actual terminal status. Cancelling a queued job makes
 	// it terminal immediately, although its event is job.cancel_requested.
@@ -51,7 +88,9 @@ func (s *Store) notify() {
 	s.notifyMu.Lock()
 	defer s.notifyMu.Unlock()
 	closeChange(&s.changed)
-	closeChange(&s.claimChanged)
+	for _, watch := range s.claimWaiters {
+		signalClaim(watch)
+	}
 }
 func (s *Store) notifyEvent(kind string) {
 	s.notifyMu.Lock()
@@ -60,14 +99,16 @@ func (s *Store) notifyEvent(kind string) {
 		closeChange(&s.changed)
 	}
 	if claimEvent(kind) {
-		closeChange(&s.claimChanged)
+		for _, watch := range s.claimWaiters {
+			signalClaim(watch)
+		}
 	}
 }
 func (s *Store) RunNotifications(ctx context.Context) {
 	for ctx.Err() == nil {
 		conn, e := pgx.ConnectConfig(ctx, s.Pool.Config().ConnConfig.Copy())
 		if e == nil {
-			_, e = conn.Exec(ctx, "LISTEN "+pgx.Identifier{s.notificationChannel()}.Sanitize())
+			_, e = conn.Exec(ctx, "LISTEN "+pgx.Identifier{s.notificationChannel()}.Sanitize()+"; LISTEN "+pgx.Identifier{s.claimNotificationChannel()}.Sanitize())
 		}
 		s.notify()
 		if e == nil {
@@ -76,7 +117,11 @@ func (s *Store) RunNotifications(ctx context.Context) {
 				if e = err; e != nil {
 					break
 				}
-				s.notifyEvent(notification.Payload)
+				if notification.Channel == s.claimNotificationChannel() {
+					s.notifyWorker(notification.Payload)
+				} else {
+					s.notifyEvent(notification.Payload)
+				}
 			}
 		}
 		if conn != nil {
@@ -116,10 +161,15 @@ func (s *Store) claimSlotWait(ctx context.Context, worker string, caps []string,
 	if err != nil {
 		return nil, err
 	}
+	if wait <= 0 {
+		return s.claimPreparedSlot(ctx, request)
+	}
+	watch := s.watchClaims(worker)
+	defer s.unwatchClaims(worker, watch)
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	for {
-		ch := s.claimChanges()
+		ch := s.claimChanges(watch)
 		job, e := s.claimPreparedSlot(ctx, request)
 		if !errors.Is(e, ErrNotFound) || wait == 0 {
 			return job, e

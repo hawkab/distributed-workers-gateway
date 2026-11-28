@@ -22,17 +22,19 @@ func TestNotificationsOnlyWakeReadersWhoseStateCanChange(t *testing.T) {
 	}{
 		{"artifact.sealed", false, false}, {"effect.started", false, false}, {"effect.completed", false, false},
 		{"completion.candidate_saved", false, false}, {"attempt.started", false, false},
-		{"job.queued", true, false}, {"job.succeeded", true, true}, {"job.failed", true, true}, {"job.cancelled", true, true}, {"job.cancel_requested", true, true},
+		{"job.queued", true, false}, {"job.succeeded", false, true}, {"job.failed", false, true}, {"job.cancelled", false, true}, {"job.cancel_requested", false, true},
 	} {
 		t.Run(c.event, func(t *testing.T) {
 			s := NewStore(nil, "")
-			claim, result := s.claimChanges(), s.changes()
+			watch := s.watchClaims("owner")
+			defer s.unwatchClaims("owner", watch)
+			claim, result := s.claimChanges(watch), s.changes()
 			s.notifyEvent(c.event)
 			if channelClosed(claim) != c.claim || channelClosed(result) != c.result {
 				t.Fatal("wrong subscribers awakened")
 			}
 			// Reconnection must reconcile every durable state, even if the hints were lost.
-			nextClaim, nextResult := s.claimChanges(), s.changes()
+			nextClaim, nextResult := s.claimChanges(watch), s.changes()
 			s.notify()
 			if !channelClosed(nextClaim) || !channelClosed(nextResult) {
 				t.Fatal("reconnect missed a reader")
@@ -47,7 +49,7 @@ func TestActualCompletionsAndQueuedCancellationWakeWaitingReaders(t *testing.T) 
 			s := fixture(t)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			initial := s.claimChanges()
+			initial := s.changes()
 			go s.RunNotifications(ctx)
 			select {
 			case <-initial:
@@ -55,14 +57,27 @@ func TestActualCompletionsAndQueuedCancellationWakeWaitingReaders(t *testing.T) 
 				t.Fatal("notification listener did not start")
 			}
 			register(t, s, "owner")
+			setup := s.watchClaims("setup")
+			defer s.unwatchClaims("setup", setup)
+			queued := s.claimChanges(setup)
 			id := enqueue(t, s, "sha256", "actual-terminal-wakeup")
+			select {
+			case <-queued:
+			case <-time.After(3 * time.Second):
+				t.Fatal("queued hint not delivered before terminal check")
+			}
 			var job *ClaimedJob
 			if status != "cancelled" {
 				var e error
 				job, e = s.Claim(ctx, "owner", []string{"sha256"})
 				must(t, e)
 			}
-			result, claim := s.changes(), s.claimChanges()
+			watch := s.watchClaims("owner")
+			defer s.unwatchClaims("owner", watch)
+			other := s.watchClaims("other")
+			defer s.unwatchClaims("other", other)
+			result, claim := s.changes(), s.claimChanges(watch)
+			otherClaim := s.claimChanges(other)
 			if status == "cancelled" {
 				must(t, s.Cancel(ctx, id))
 			} else {
@@ -74,14 +89,37 @@ func TestActualCompletionsAndQueuedCancellationWakeWaitingReaders(t *testing.T) 
 				_, e := s.Complete(ctx, id, c)
 				must(t, e)
 			}
-			for _, ch := range []<-chan struct{}{result, claim} {
+			channels := []<-chan struct{}{result}
+			if status != "cancelled" {
+				channels = append(channels, claim)
+			}
+			for _, ch := range channels {
 				select {
 				case <-ch:
 				case <-time.After(3 * time.Second):
 					t.Fatal("committed terminal state did not wake readers")
 				}
 			}
+			if channelClosed(otherClaim) {
+				t.Fatal("another worker was awakened by this completion")
+			}
 		})
+	}
+}
+
+func TestClaimWatchReferencesAreReleased(t *testing.T) {
+	s := NewStore(nil, "")
+	a, b := s.watchClaims("one"), s.watchClaims("one")
+	if a != b || len(s.claimWaiters) != 1 {
+		t.Fatal("watchers not shared")
+	}
+	s.unwatchClaims("one", a)
+	if len(s.claimWaiters) != 1 {
+		t.Fatal("live watcher removed")
+	}
+	s.unwatchClaims("one", b)
+	if s.claimWaiters != nil {
+		t.Fatal("idle worker registry retained")
 	}
 }
 

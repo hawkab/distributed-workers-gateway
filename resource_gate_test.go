@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -115,5 +116,39 @@ func TestResourceGateIsFencedAndSharedWithoutWaitingForCompletion(t *testing.T) 
 	w := request(t, h, "GET", "/v1/admin/workers", grant, "")
 	if w.Code != 401 || strings.Contains(fmt.Sprint(w.Body), grant) {
 		t.Fatal("resource grant leaked authority")
+	}
+}
+
+func TestCommandDeliveryKeepsOnlyEnforceableWorkerPolicy(t *testing.T) {
+	api := API{AdminToken: "test-secret"}
+	gate := json.RawMessage(`{"resource":"provider-a","input_field":"payload"}`)
+	for _, withRestriction := range []bool{false, true} {
+		net := map[string]json.RawMessage{"resource_gate": gate}
+		if withRestriction {
+			net["origins"] = json.RawMessage(`[]`)
+		}
+		policy, _ := json.Marshal(net)
+		j := ClaimedJob{Operation: "command.run", Input: json.RawMessage(`{"program":"local","payload":{"work":1}}`), Network: policy}
+		w := httptest.NewRecorder()
+		api.deliverJob(w, &j)
+		var delivered struct {
+			Job struct {
+				Network map[string]json.RawMessage `json:"network"`
+			}
+		}
+		if w.Code != 200 {
+			t.Fatal(w.Code)
+		}
+		must(t, json.Unmarshal(w.Body.Bytes(), &delivered))
+		if withRestriction {
+			if len(delivered.Job.Network) != 1 || string(delivered.Job.Network["origins"]) != "[]" {
+				t.Fatal("lost worker sandbox restriction")
+			}
+		} else if delivered.Job.Network != nil {
+			t.Fatal("scoped grant was exposed as a native command network sandbox")
+		}
+		if !strings.Contains(string(j.Input), "resource_gate_grant") {
+			t.Fatal("missing scoped authority")
+		}
 	}
 }

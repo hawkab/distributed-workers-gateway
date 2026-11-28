@@ -77,6 +77,18 @@ func (a *API) deliverJob(w http.ResponseWriter, job *ClaimedJob) {
 		payload["resource_gate_grant"], _ = json.Marshal(encoded + "." + a.gateMAC("grant", encoded))
 		wrapper[g.InputField], _ = json.Marshal(payload)
 		job.Input, _ = json.Marshal(wrapper)
+		// resource_gate controls the producer's coordination channel. Only
+		// actual network restrictions belong in the worker sandbox policy.
+		var network map[string]json.RawMessage
+		if json.Unmarshal(job.Network, &network) != nil {
+			fail(w, ErrInvalid)
+			return
+		}
+		delete(network, "resource_gate")
+		job.Network = nil
+		if len(network) > 0 {
+			job.Network, _ = json.Marshal(network)
+		}
 	}
 	writeJSON(w, 200, map[string]any{"job": job})
 }

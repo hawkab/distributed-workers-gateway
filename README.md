@@ -283,3 +283,27 @@ Measured 26–27 November 2026 (UTC+03), using SDK 0.8.4 and Android 0.8.0.
 
 Times distinguish queue wait from execution **including task work and result delivery**. They are live-system observations under existing load, not pure CPU timings. Complete cohorts use five trials each; see the [full measurements and method](https://github.com/hawkab/distributed-workers-protocol/blob/main/docs/EXAMPLES.md).
 <!-- fleet-examples:end -->
+
+## Shared resource permissions
+
+A producer can coordinate access to a shared upstream service across jobs. Set
+`network.resource_gate` to `{"resource":"example-feed","input_field":"payload"}`
+and use an object at `input.payload`. The gateway injects `resource_gate_grant`
+into that object only when delivering it to the current attempt. The producer's
+stored input and idempotency hash stay stable.
+
+Before each upstream request, send `{"action":"permit"}` to
+`POST /v1/resource-permit` over HTTPS using the grant as a Bearer token. A
+positive `wait_ms` defers the request. A ticket permits a single immediate
+start within `valid_ms`. Discard late permits and request another, supplying
+the observed `rtt_ms`. Send `{"action":"pause","ticket":T,"retry_after_seconds":N}`
+on receiving an upstream cooldown. The coordinator applies the longest active
+pause for that resource and deduplicates a redelivered pause for the same
+ticket. After expiry it grants one probe. Report `release` with the probe
+ticket on success or `abandon` if that probe could not start. A lost probe
+can be replaced after the lease interval. Ordinary successful requests need
+no acknowledgement. Keep grants off URLs, upstream headers and diagnostics.
+
+An authenticated producer performing its own work uses
+`POST /v1/admin/resource-permit` with the same messages and the resource field.
+`GET /v1/admin/resource-permit` reports the protocol version for staged rollout.

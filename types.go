@@ -135,6 +135,16 @@ func (j EnqueueJob) normalized() (EnqueueJob, error) {
 			if json.Unmarshal(j.Network, &network) != nil || network == nil {
 				return j, ErrInvalid
 			}
+			g, gateErr := gateFromNetwork(j.Network)
+			if gateErr != nil {
+				return j, gateErr
+			}
+			if g != nil {
+				var payload map[string]json.RawMessage
+				if json.Unmarshal(obj[g.InputField], &payload) != nil || payload == nil || payload["resource_gate_grant"] != nil {
+					return j, ErrInvalid
+				}
+			}
 			j.Network, e = canonical(j.Network)
 			if e != nil {
 				return j, e

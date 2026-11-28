@@ -89,5 +89,5 @@ func (a *API) currentJob(w http.ResponseWriter, r *http.Request) {
 		fail(w, e)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"job": job})
+	a.deliverJob(w, job)
 }

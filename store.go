@@ -100,6 +100,9 @@ CREATE TABLE IF NOT EXISTS %[8]s(
 	if e = s.initProfiles(ctx); e != nil {
 		return e
 	}
+	if e = s.initResourceGate(ctx); e != nil {
+		return e
+	}
 	return s.initArtifacts(ctx)
 }
 func (s *Store) WorkerByToken(ctx context.Context, token string) (string, error) {

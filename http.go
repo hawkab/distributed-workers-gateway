@@ -26,6 +26,13 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.health)
+	mux.HandleFunc("POST /v1/resource-permit", a.workerResourceGate)
+	mux.HandleFunc("POST /v1/admin/resource-permit", a.adminResourceGate)
+	mux.HandleFunc("GET /v1/admin/resource-permit", func(w http.ResponseWriter, r *http.Request) {
+		if a.admin(w, r) {
+			writeJSON(w, 200, map[string]int{"version": 1})
+		}
+	})
 	mux.HandleFunc("POST /v1/admin/enrollments", a.createEnrollment)
 	mux.HandleFunc("POST /v1/workers/connect", a.connectWorker)
 	mux.HandleFunc("GET /v1/workers/me", a.workerMe)
@@ -58,7 +65,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/events", a.command)
 	mux.HandleFunc("GET /releases/android-stable/{name}", a.release)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/v1/") && !strings.HasPrefix(r.URL.Path, "/v1/admin/") && !(r.Method == http.MethodPost && r.URL.Path == "/v1/workers/connect") {
+		if strings.HasPrefix(r.URL.Path, "/v1/") && !strings.HasPrefix(r.URL.Path, "/v1/admin/") && !(r.Method == http.MethodPost && (r.URL.Path == "/v1/workers/connect" || r.URL.Path == "/v1/resource-permit")) {
 			token := bearer(r)
 			if token == "" {
 				fail(w, ErrUnauthorized)
@@ -239,7 +246,7 @@ func (a *API) claim(w http.ResponseWriter, r *http.Request) {
 		fail(w, e)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"job": job})
+	a.deliverJob(w, job)
 }
 func (a *API) jobHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var h JobHeartbeat

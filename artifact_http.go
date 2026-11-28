@@ -45,6 +45,23 @@ func (a *API) createArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, status, out)
 }
+func (a *API) putSealedArtifact(w http.ResponseWriter, r *http.Request) {
+	i, ok := a.streamIdentity(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	c := CreateArtifact{AttemptIdentity: i, Key: q.Get("key"), Name: q.Get("name"), MediaType: q.Get("media_type")}
+	if c.MediaType == "" {
+		c.MediaType = r.Header.Get("Content-Type")
+	}
+	receipt, err := a.Store.PutSealedArtifact(r.Context(), r.PathValue("id"), c, r.ContentLength, q.Get("sha256"), r.Body)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, receipt)
+}
 func (a *API) artifactStatus(w http.ResponseWriter, r *http.Request) {
 	i, ok := a.streamIdentity(w, r)
 	if !ok {

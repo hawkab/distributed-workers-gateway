@@ -9,7 +9,6 @@ import (
 	"io"
 	"math"
 	"mime"
-	"os"
 	"strings"
 )
 
@@ -22,6 +21,7 @@ CREATE TABLE IF NOT EXISTS %[1]s(
  byte_offset bigint NOT NULL DEFAULT 0 CHECK(byte_offset>=0),blob_sha256 text,receipt jsonb,chunks_cleaned boolean NOT NULL DEFAULT false,
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(attempt_id,artifact_key));
 ALTER TABLE %[1]s ADD COLUMN IF NOT EXISTS artifact_name text NOT NULL DEFAULT '';
+ALTER TABLE %[1]s ADD COLUMN IF NOT EXISTS scoped_tmp boolean NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS %[5]s(
  upload_id uuid NOT NULL REFERENCES %[1]s(id),byte_offset bigint NOT NULL,length bigint NOT NULL CHECK(length>0),sha256 text NOT NULL,
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),PRIMARY KEY(upload_id,byte_offset));
@@ -84,12 +84,21 @@ func (s *Store) artifactByID(ctx context.Context, q interface {
 	return u, nil
 }
 func (s *Store) CreateArtifact(ctx context.Context, job string, c CreateArtifact) (ArtifactStatus, bool, error) {
-	var out ArtifactStatus
+	id, created, err := s.createArtifactID(ctx, job, c)
+	if err != nil {
+		return ArtifactStatus{}, false, err
+	}
+	status, err := s.artifactWriteStatus(ctx, id, c.AttemptIdentity)
+	return status, created, err
+}
+
+func (s *Store) createArtifactID(ctx context.Context, job string, c CreateArtifact) (string, bool, error) {
+
 	if s.Artifacts == nil {
-		return out, false, ErrUnavailable
+		return "", false, ErrUnavailable
 	}
 	if !uuidPattern.MatchString(job) || !c.AttemptIdentity.valid() || !artifactKeyPattern.MatchString(c.Key) {
-		return out, false, ErrInvalid
+		return "", false, ErrInvalid
 	}
 	if c.MediaType == "" {
 		c.MediaType = "application/octet-stream"
@@ -98,41 +107,40 @@ func (s *Store) CreateArtifact(ctx context.Context, job string, c CreateArtifact
 		c.Name = c.Key
 	}
 	if strings.ContainsAny(c.Name, "\r\n\x00") {
-		return out, false, ErrInvalid
+		return "", false, ErrInvalid
 	}
 	if _, _, e := mime.ParseMediaType(c.MediaType); e != nil {
-		return out, false, ErrInvalid
+		return "", false, ErrInvalid
 	}
 	var owned bool
 	e := s.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM `+s.table("attempts")+` WHERE id=$1 AND job_id=$2 AND worker_id=$3 AND fencing_token=$4)`, c.AttemptID, job, c.WorkerID, c.FencingToken).Scan(&owned)
 	if e != nil {
-		return out, false, e
+		return "", false, e
 	}
 	if !owned {
-		return out, false, ErrUnauthorized
+		return "", false, ErrUnauthorized
 	}
 	id := newID()
 	hash := digest(struct {
 		Job     string
 		Request CreateArtifact
 	}{job, c})
-	tag, e := s.Pool.Exec(ctx, `INSERT INTO `+s.table("artifact_uploads")+`(id,job_id,attempt_id,worker_id,fencing_token,artifact_key,artifact_name,media_type,request_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(attempt_id,artifact_key) DO NOTHING`, id, job, c.AttemptID, c.WorkerID, c.FencingToken, c.Key, c.Name, c.MediaType, hash)
+	tag, e := s.Pool.Exec(ctx, `INSERT INTO `+s.table("artifact_uploads")+`(id,job_id,attempt_id,worker_id,fencing_token,artifact_key,artifact_name,media_type,request_hash,scoped_tmp) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,true) ON CONFLICT(attempt_id,artifact_key) DO NOTHING`, id, job, c.AttemptID, c.WorkerID, c.FencingToken, c.Key, c.Name, c.MediaType, hash)
 	if e != nil {
-		return out, false, e
+		return "", false, e
 	}
 	created := tag.RowsAffected() == 1
 	if !created {
 		var old []byte
 		e = s.Pool.QueryRow(ctx, `SELECT id::text,request_hash FROM `+s.table("artifact_uploads")+` WHERE attempt_id=$1 AND artifact_key=$2`, c.AttemptID, c.Key).Scan(&id, &old)
 		if e != nil {
-			return out, false, e
+			return "", false, e
 		}
 		if !sameBytes(old, hash) {
-			return out, false, ErrConflict
+			return "", false, ErrConflict
 		}
 	}
-	out, e = s.artifactWriteStatus(ctx, id, c.AttemptIdentity)
-	return out, created, e
+	return id, created, nil
 }
 func (s *Store) ArtifactStatus(ctx context.Context, id string, identity AttemptIdentity) (ArtifactStatus, error) {
 	if !identity.valid() {
@@ -238,7 +246,7 @@ func (s *Store) PutArtifactChunk(ctx context.Context, id string, identity Attemp
 	if e != nil {
 		return out, e
 	}
-	defer os.Remove(staged.path)
+	defer removeArtifactStage(staged.path)
 	if staged.length <= 0 || staged.length > math.MaxInt64-offset {
 		return out, ErrInvalid
 	}

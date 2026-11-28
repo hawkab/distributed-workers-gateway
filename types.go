@@ -162,6 +162,7 @@ func (j EnqueueJob) normalized() (EnqueueJob, error) {
 }
 
 type ClaimedJob struct {
+	SealedArtifactPut    bool            `json:"sealed_artifact_put,omitempty"`
 	ID                   string          `json:"id"`
 	Operation            string          `json:"operation"`
 	Input                json.RawMessage `json:"input"`

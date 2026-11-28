@@ -43,6 +43,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/{id}/heartbeat", a.jobHeartbeat)
 	mux.HandleFunc("POST /v1/jobs/{id}/complete", a.complete)
 	mux.HandleFunc("POST /v1/jobs/{id}/artifacts", a.createArtifact)
+	mux.HandleFunc("PUT /v1/jobs/{id}/artifacts/content", a.putSealedArtifact)
 	mux.HandleFunc("GET /v1/artifacts/{id}/status", a.artifactStatus)
 	mux.HandleFunc("GET /v1/artifacts/{id}/content", a.workerArtifactContent)
 	mux.HandleFunc("PUT /v1/artifacts/{id}/chunks/{offset}", a.putArtifactChunk)

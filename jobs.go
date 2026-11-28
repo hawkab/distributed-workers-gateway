@@ -67,7 +67,7 @@ func (s *Store) claimPreparedSlot(ctx context.Context, request preparedClaim) (*
 	if e != nil {
 		return nil, e
 	}
-	var j ClaimedJob
+	j := ClaimedJob{SealedArtifactPut: s.Artifacts != nil}
 	e = tx.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,a.id::text,a.fencing_token,a.lease_until,j.network,j.resource_requirements FROM `+s.table("jobs")+` j JOIN `+s.table("attempts")+` a ON a.id=j.active_attempt_id WHERE j.status='running' AND a.worker_id=$1 AND a.slot_id=$2 AND a.status='running' AND a.lease_until>clock_timestamp() ORDER BY a.started_at LIMIT 1`, worker, slot).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.AttemptID, &j.FencingToken, &j.LeaseUntil, &j.Network, &j.ResourceRequirements)
 	if e == nil {
 		return &j, tx.Commit(ctx)
@@ -132,7 +132,7 @@ func (s *Store) claimPreparedSlot(ctx context.Context, request preparedClaim) (*
 	return &j, tx.Commit(ctx)
 }
 func (s *Store) CurrentJob(ctx context.Context, worker string) (*ClaimedJob, error) {
-	var j ClaimedJob
+	j := ClaimedJob{SealedArtifactPut: s.Artifacts != nil}
 	e := s.Pool.QueryRow(ctx, `SELECT j.id::text,j.operation,j.input,j.script,a.id::text,a.fencing_token,a.lease_until,j.network,j.resource_requirements FROM `+s.table("jobs")+` j JOIN `+s.table("attempts")+` a ON a.id=j.active_attempt_id JOIN `+s.table("workers")+` w ON w.id=a.worker_id WHERE w.id=$1 AND w.enabled AND j.status='running' AND NOT j.cancel_requested AND a.status='running' AND a.lease_until>clock_timestamp() AND a.fencing_token=j.fencing_token ORDER BY a.started_at LIMIT 1`, worker).Scan(&j.ID, &j.Operation, &j.Input, &j.Script, &j.AttemptID, &j.FencingToken, &j.LeaseUntil, &j.Network, &j.ResourceRequirements)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return nil, ErrNotFound

@@ -71,8 +71,29 @@ func copyArtifact(ctx context.Context, w io.Writer, r io.Reader) (string, int64,
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, e
 }
+
+// Keep new temporary files with the owning upload. A concurrent finisher
+// can reclaim an empty directory between mkdir and CreateTemp.
+func (f *ArtifactFiles) temporary(ctx context.Context, id, prefix string) (*os.File, error) {
+	dir := filepath.Join(f.root, "chunks", id)
+	for ctx.Err() == nil {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return nil, err
+		}
+		file, err := os.CreateTemp(dir, prefix)
+		if !errors.Is(err, os.ErrNotExist) {
+			return file, err
+		}
+	}
+	return nil, ctx.Err()
+}
+func removeArtifactStage(path string) {
+	_ = os.Remove(path)
+	// Other writers and published segments keep a nonempty directory alive.
+	_ = os.Remove(filepath.Dir(path))
+}
 func (f *ArtifactFiles) stage(ctx context.Context, id string, r io.Reader) (out stagedArtifact, e error) {
-	file, e := os.CreateTemp(filepath.Join(f.root, "tmp"), id+"-stream-")
+	file, e := f.temporary(ctx, id, "stream-")
 	if e != nil {
 		return out, e
 	}
@@ -80,7 +101,7 @@ func (f *ArtifactFiles) stage(ctx context.Context, id string, r io.Reader) (out 
 	defer func() {
 		file.Close()
 		if e != nil {
-			os.Remove(out.path)
+			removeArtifactStage(out.path)
 		}
 	}()
 	out.sha, out.length, e = copyArtifact(ctx, file, r)

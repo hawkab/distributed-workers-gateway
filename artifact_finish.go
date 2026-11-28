@@ -71,11 +71,11 @@ func (s *Store) assembleArtifact(ctx context.Context, u artifactUpload) (string,
 		return "", e
 	}
 	defer rows.Close()
-	file, e := os.CreateTemp(s.Artifacts.root+"/tmp", u.id+"-merge-")
+	file, e := s.Artifacts.temporary(ctx, u.id, "merge-")
 	if e != nil {
 		return "", e
 	}
-	defer func() { file.Close(); os.Remove(file.Name()) }()
+	defer func() { file.Close(); removeArtifactStage(file.Name()) }()
 	whole := sha256.New()
 	writer := io.MultiWriter(file, whole)
 	offset := int64(0)
@@ -190,13 +190,8 @@ func (s *Store) FinishArtifact(ctx context.Context, id string, c FinishArtifact)
 	if u.status != "open" || u.offset != c.Length {
 		return out, ErrConflict
 	}
-	out = ArtifactReceipt{ArtifactRef: ArtifactRef{ArtifactID: id, Name: u.name, SHA256: sha, Length: c.Length, MediaType: u.media}, Committed: live, CandidateSaved: !live}
-	receipt, _ := json.Marshal(out)
-	_, e = tx.Exec(ctx, `UPDATE `+s.table("artifact_uploads")+` SET status='sealed',blob_sha256=$2,receipt=$3,updated_at=clock_timestamp() WHERE id=$1`, id, sha, receipt)
+	out, e = s.sealArtifact(ctx, tx, u, sha, c.Length, live)
 	if e != nil {
-		return out, e
-	}
-	if e = s.event(ctx, tx, "artifact.sealed", map[string]any{"job_id": u.job, "attempt_id": u.attempt, "artifact": map[string]any{"artifact_id": out.ArtifactID, "sha256": out.SHA256, "length": out.Length}, "candidate_saved": out.CandidateSaved, "result_committed": false}); e != nil {
 		return out, e
 	}
 	if e = tx.Commit(ctx); e != nil {
@@ -207,14 +202,87 @@ func (s *Store) FinishArtifact(ctx context.Context, id string, c FinishArtifact)
 	_ = s.cleanupArtifact(ctx, id, true)
 	return out, nil
 }
+func (s *Store) sealArtifact(ctx context.Context, tx pgx.Tx, u artifactUpload, sha string, length int64, live bool) (ArtifactReceipt, error) {
+	id := u.id
+	out := ArtifactReceipt{ArtifactRef: ArtifactRef{ArtifactID: id, Name: u.name, SHA256: sha, Length: length, MediaType: u.media}, Committed: live, CandidateSaved: !live}
+	receipt, _ := json.Marshal(out)
+	_, e := tx.Exec(ctx, `UPDATE `+s.table("artifact_uploads")+` SET status='sealed',blob_sha256=$2,receipt=$3,byte_offset=$4,updated_at=clock_timestamp() WHERE id=$1`, id, sha, receipt, length)
+	if e != nil {
+		return out, e
+	}
+	if e = s.event(ctx, tx, "artifact.sealed", map[string]any{"job_id": u.job, "attempt_id": u.attempt, "artifact": map[string]any{"artifact_id": out.ArtifactID, "sha256": out.SHA256, "length": out.Length}, "candidate_saved": out.CandidateSaved, "result_committed": false}); e != nil {
+		return out, e
+	}
+	return out, nil
+}
+
+// PutSealedArtifact publishes one known byte sequence. createArtifactID reserves the
+// same key as the resumable protocol. A dropped response can replay that key and
+// body, including after lease expiry, without duplicating the seal event.
+func (s *Store) PutSealedArtifact(ctx context.Context, job string, c CreateArtifact, length int64, sha string, body io.Reader) (ArtifactReceipt, error) {
+	var out ArtifactReceipt
+	if length < 0 || !validSHA(sha) {
+		return out, ErrInvalid
+	}
+	id, _, err := s.createArtifactID(ctx, job, c)
+	if err != nil {
+		return out, err
+	}
+	staged, err := s.Artifacts.stage(ctx, id, body)
+	if err != nil {
+		return out, err
+	}
+	defer removeArtifactStage(staged.path)
+	if sha != staged.sha || length != staged.length {
+		return out, ErrConflict
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback(ctx)
+	live, err := s.attemptState(ctx, tx, job, c.AttemptIdentity)
+	if err != nil {
+		return out, err
+	}
+	u, err := s.upload(ctx, tx, id, c.AttemptIdentity, true)
+	if err != nil {
+		return out, err
+	}
+	if u.status == "sealed" {
+		if err = json.Unmarshal(u.receipt, &out); err != nil {
+			return out, err
+		}
+		if out.SHA256 != sha || out.Length != length {
+			return ArtifactReceipt{}, ErrConflict
+		}
+		return out, tx.Commit(ctx)
+	}
+	if u.status != "open" || u.offset != 0 {
+		return out, ErrConflict
+	}
+	if err = s.Artifacts.promoteObject(ctx, staged); err != nil {
+		return out, err
+	}
+	out, err = s.sealArtifact(ctx, tx, u, sha, length, live)
+	if err != nil {
+		return out, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return out, err
+	}
+	_ = s.cleanupArtifact(ctx, id, true)
+	return out, nil
+}
+
 func (s *Store) cleanupArtifact(ctx context.Context, id string, alreadyVerified bool) error {
 	if s.Artifacts == nil {
 		return nil
 	}
 	var sha string
 	var length int64
-	var cleaned bool
-	e := s.Pool.QueryRow(ctx, `SELECT blob_sha256,byte_offset,chunks_cleaned FROM `+s.table("artifact_uploads")+` WHERE id=$1 AND status='sealed'`, id).Scan(&sha, &length, &cleaned)
+	var cleaned, scopedTmp bool
+	e := s.Pool.QueryRow(ctx, `SELECT blob_sha256,byte_offset,chunks_cleaned,scoped_tmp FROM `+s.table("artifact_uploads")+` WHERE id=$1 AND status='sealed'`, id).Scan(&sha, &length, &cleaned, &scopedTmp)
 	if e != nil {
 		return e
 	}
@@ -240,8 +308,10 @@ func (s *Store) cleanupArtifact(ctx context.Context, id string, alreadyVerified 
 	if e = cleanArtifactDirectory(filepath.Join(s.Artifacts.root, "chunks", id), ""); e != nil {
 		return e
 	}
-	if e = cleanArtifactDirectory(filepath.Join(s.Artifacts.root, "tmp"), id+"-"); e != nil {
-		return e
+	if !scopedTmp {
+		if e = cleanArtifactDirectory(filepath.Join(s.Artifacts.root, "tmp"), id+"-"); e != nil {
+			return e
+		}
 	}
 	_, e = s.Pool.Exec(ctx, `UPDATE `+s.table("artifact_uploads")+` SET chunks_cleaned=true WHERE id=$1 AND status='sealed' AND blob_sha256=$2`, id, sha)
 	return e
@@ -306,6 +376,30 @@ func (s *Store) ReconcileArtifacts(ctx context.Context) error {
 	}
 }
 func (s *Store) validateArtifacts(ctx context.Context, tx pgx.Tx, job string, ids []string) error {
+	if len(ids) > 1 {
+		// Preserve the error from the first invalid reference in caller order.
+		var violation string
+		err := tx.QueryRow(ctx, `SELECT CASE WHEN a.id IS NULL THEN 'missing'
+                WHEN a.job_id <> $1::uuid THEN 'foreign' ELSE 'unfinished' END
+            FROM unnest($2::uuid[]) WITH ORDINALITY ref(id, ord)
+            LEFT JOIN `+s.table("artifact_uploads")+` a USING(id)
+            WHERE a.id IS NULL OR a.job_id <> $1::uuid OR a.status <> 'sealed'
+            ORDER BY ref.ord LIMIT 1`, job, ids).Scan(&violation)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch violation {
+		case "missing":
+			return ErrNotFound
+		case "foreign":
+			return ErrUnauthorized
+		default:
+			return ErrConflict
+		}
+	}
 	for _, id := range ids {
 		var storedJob, status string
 		e := tx.QueryRow(ctx, `SELECT job_id::text,status FROM `+s.table("artifact_uploads")+` WHERE id=$1`, id).Scan(&storedJob, &status)

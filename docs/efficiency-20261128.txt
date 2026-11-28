@@ -15,9 +15,10 @@ Changes
    Claim selection uses CASE to avoid evaluating resources for an unexpired
    lease. Priority order, SKIP LOCKED and clock_timestamp expiry checks remain.
 3. Claims and terminal-result observers have separate lazy change channels.
-   Pending claims share a reference-counted signal per worker. A committed
-   completion wakes only that worker's claims (its slot budget may now permit
-   work), not every idle slot on every machine. Enqueue and reconnect still
+   Pending claims share a reference-counted signal per worker. A live slot
+   release wakes only that worker's claims (its slot budget may now permit
+   work), including a cancelled live attempt saved as a candidate, not every
+   idle slot on every machine. Enqueue and reconnect still
    reconcile all waiting workers. Releasing the last waiter removes its entry;
    the entire map is released when empty. Zero-wait claims allocate no timer or
    observer. A separate internal PG channel carries worker-availability hints;
@@ -52,7 +53,7 @@ Local isolated PostgreSQL/RabbitMQ tests and three benchmark samples:
 
 Validation
   go test -race -json -timeout=0 -count=1 ./... against disposable PostgreSQL
-  and RabbitMQ: 69 test/subtest passes, zero failures and zero skips.
+  and RabbitMQ: 70 test/subtest passes, zero failures and zero skips.
   New regression cases exercise real Complete/Cancel commits over PG LISTEN/
   NOTIFY, not just manually invented event labels. They protect prompt terminal
   wakeups and queued cancellation. Another case makes resource matching fail

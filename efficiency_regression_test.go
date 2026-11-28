@@ -21,7 +21,7 @@ func TestNotificationsOnlyWakeReadersWhoseStateCanChange(t *testing.T) {
 		claim, result bool
 	}{
 		{"artifact.sealed", false, false}, {"effect.started", false, false}, {"effect.completed", false, false},
-		{"completion.candidate_saved", false, false}, {"attempt.started", false, false},
+		{"result.candidate_saved", false, false}, {"attempt.started", false, false},
 		{"job.queued", true, false}, {"job.succeeded", false, true}, {"job.failed", false, true}, {"job.cancelled", false, true}, {"job.cancel_requested", false, true},
 	} {
 		t.Run(c.event, func(t *testing.T) {
@@ -44,7 +44,7 @@ func TestNotificationsOnlyWakeReadersWhoseStateCanChange(t *testing.T) {
 }
 
 func TestActualCompletionsAndQueuedCancellationWakeWaitingReaders(t *testing.T) {
-	for _, status := range []string{"succeeded", "failed", "cancelled"} {
+	for _, status := range []string{"succeeded", "failed", "cancelled", "cancelled-running"} {
 		t.Run(status, func(t *testing.T) {
 			s := fixture(t)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -83,11 +83,19 @@ func TestActualCompletionsAndQueuedCancellationWakeWaitingReaders(t *testing.T) 
 			} else {
 				c := done(job, "owner")
 				c.Status = status
+				if status == "cancelled-running" {
+					must(t, s.Cancel(ctx, id))
+					c.Status = "failed"
+					c.Error = []byte(`{"message":"cancelled"}`)
+				}
 				if status == "failed" {
 					c.Error = []byte(`{"message":"test failure"}`)
 				}
-				_, e := s.Complete(ctx, id, c)
+				receipt, e := s.Complete(ctx, id, c)
 				must(t, e)
+				if status == "cancelled-running" && (!receipt.CandidateSaved || receipt.Committed) {
+					t.Fatal("cancelled attempt receipt semantics changed")
+				}
 			}
 			channels := []<-chan struct{}{result}
 			if status != "cancelled" {

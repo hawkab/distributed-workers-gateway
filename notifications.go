@@ -203,23 +203,39 @@ func (a *API) waitJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	prefer := r.Header.Values("Prefer")
+	minimal := prefers(prefer, "return=minimal")
+	inline := minimal && prefers(prefer, "include=small-results")
 	projection := `jsonb_build_object('id',j.id,'status',j.status,'result',(SELECT jsonb_build_object('status',r.status,'result',r.result,'error',r.error) FROM ` + a.Store.table("results") + ` r WHERE r.job_id=j.id))`
-	if strings.Contains(r.Header.Get("Prefer"), "return=minimal") {
-		projection = `jsonb_build_object('id',j.id,'status',j.status,'result_ref','/v1/admin/jobs/'||j.id::text||'/result')`
+	if minimal {
+		projection = waitRefJSON
 		w.Header().Set("Preference-Applied", "return=minimal")
 	}
-	query := `SELECT coalesce(jsonb_agg(` + projection + `),'[]'::jsonb) FROM ` + a.Store.table("jobs") + ` j WHERE j.id=ANY($1::uuid[]) AND j.status IN('succeeded','failed','cancelled')`
+	query := `SELECT coalesce(jsonb_agg(` + projection + `),'[]'::jsonb), false FROM ` + a.Store.table("jobs") + ` j WHERE j.id=ANY($1::uuid[]) AND j.status IN('succeeded','failed','cancelled')`
+	args := []any{req.IDs}
+	if inline {
+		w.Header().Set("Preference-Applied", "return=minimal, include=small-results")
+		query = a.Store.smallResultsWaitSQL()
+		args = append(args, waitMaxRefRows, waitRefReserveBytes, waitEnvelopeReserveBytes, waitResponseBudgetBytes)
+	}
 	timer := time.NewTimer(requestedWait(r))
 	defer timer.Stop()
 	for {
 		ch := a.Store.changes()
 		var b []byte
-		e := a.Store.Pool.QueryRow(r.Context(), query, req.IDs).Scan(&b)
+		var more bool
+		e := a.Store.Pool.QueryRow(r.Context(), query, args...).Scan(&b, &more)
 		if e != nil {
 			fail(w, e)
 			return
 		}
-		if string(b) != "[]" {
+		if len(b) > 2 {
+			if inline {
+				// PostgreSQL has produced valid JSON. Writing its bytes directly preserves
+				// the measured bound even when a JSON string contains many HTML characters.
+				writeSmallWait(w, b, more)
+				return
+			}
 			writeJSON(w, 200, map[string]any{"jobs": json.RawMessage(b)})
 			return
 		}

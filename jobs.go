@@ -232,7 +232,11 @@ func (s *Store) Complete(ctx context.Context, job string, request Complete) (Com
 	}
 	out.Committed = !cancelRequested && current != nil && *current == c.AttemptID && currentFence == c.FencingToken && jobStatus == "running" && live
 	if out.Committed {
-		_, e = tx.Exec(ctx, `INSERT INTO `+s.table("results")+`(job_id,attempt_id,status,result,error,completion_hash,artifact_ids) VALUES($1,$2,$3,$4,$5,$6,$7)`, job, c.AttemptID, c.Status, []byte(c.Result), []byte(c.Error), hash, c.ArtifactIDs)
+		_, e = tx.Exec(ctx, `INSERT INTO `+s.table("results")+`(job_id,attempt_id,status,result,error,completion_hash,artifact_ids,wait_inline_bytes)
+            VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $8::boolean THEN
+                nullif(least(octet_length((`+waitResultJSON("$1::uuid", "$3::text", "$4::jsonb", "$5::jsonb")+`)::text), $9::integer+1), $9::integer+1)::smallint END)`,
+			job, c.AttemptID, c.Status, []byte(c.Result), []byte(c.Error), hash, c.ArtifactIDs,
+			canMeasureWaitResult(c.Result, c.Error), waitInlineResultBytes)
 		if e != nil {
 			return out, e
 		}

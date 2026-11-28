@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS %[5]s(
  worker_id text NOT NULL,status text NOT NULL,result jsonb NOT NULL,error jsonb,completion_hash bytea NOT NULL,
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(attempt_id,completion_hash));
 ALTER TABLE %[4]s ADD COLUMN IF NOT EXISTS artifact_ids text[] NOT NULL DEFAULT '{}';
+ALTER TABLE %[4]s ADD COLUMN IF NOT EXISTS wait_inline_bytes smallint;
 ALTER TABLE %[5]s ADD COLUMN IF NOT EXISTS artifact_ids text[] NOT NULL DEFAULT '{}';
 CREATE TABLE IF NOT EXISTS %[6]s(
  event_id uuid PRIMARY KEY,event_type text NOT NULL,payload jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
